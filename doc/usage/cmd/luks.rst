@@ -248,6 +248,7 @@ if unlock failed (wrong passphrase, unsupported format, etc.).
 See also
 --------
 
+* :doc:`../luks` - Comprehensive LUKS feature documentation
 * :doc:`blkmap` - Blkmap device documentation
 * cryptsetup project: https://gitlab.com/cryptsetup/cryptsetup
 * LUKS on-disk format specifications: https://gitlab.com/cryptsetup/cryptsetup/-/wikis/home
