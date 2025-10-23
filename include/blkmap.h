@@ -69,6 +69,30 @@ int blkmap_map_pmem(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
 		    phys_addr_t paddr, bool preserve);
 
 /**
+ * blkmap_map_crypt() - Map region of encrypted device
+ *
+ * Creates a mapping that performs on-the-fly decryption of the specified
+ * region from another block device. Suitable for LUKS and other encrypted
+ * block devices.
+ *
+ * @dev: Blkmap to create the mapping on
+ * @blknr: Start block number of the mapping
+ * @blkcnt: Number of blocks to map
+ * @lblk: The target block device containing encrypted data
+ * @lblknr: The start block number of the encrypted partition
+ * @master_key: Decrypted master key for decryption
+ * @key_size: Size of the master key in bytes (must be <= 128)
+ * @payload_offset: Offset in sectors from lblknr to actual encrypted payload
+ * @use_essiv: True to use ESSIV mode, false for plain64 mode
+ * @essiv_key: ESSIV key (SHA256 of master key), or NULL if use_essiv is false
+ * Returns: 0 on success, negative error code on failure
+ */
+int blkmap_map_crypt(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
+		     struct udevice *lblk, lbaint_t lblknr,
+		     const u8 *master_key, u32 key_size, u32 payload_offset,
+		     bool use_essiv, const u8 *essiv_key);
+
+/**
  * blkmap_from_label() - Find blkmap from label
  *
  * @label: Label of the requested blkmap
