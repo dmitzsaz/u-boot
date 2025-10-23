@@ -2966,6 +2966,15 @@ config CMD_FS_UUID
 	help
 	  Enables fsuuid command for filesystem UUID.
 
+config CMD_LUKS
+	bool "luks command"
+	depends on BLK_LUKS
+	default y if BLK_LUKS
+	help
+	  Enables the 'luks' command for detecting LUKS (Linux Unified Key
+	  Setup) encrypted partitions. This command checks if a partition
+	  is LUKS encrypted and displays the LUKS version (1 or 2).
+
 config CMD_JFFS2
 	bool "jffs2 command"
 	depends on !64BIT

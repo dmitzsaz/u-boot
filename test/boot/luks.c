@@ -65,3 +65,45 @@ static int bootstd_test_luks_detect(struct unit_test_state *uts)
 	return 0;
 }
 BOOTSTD_TEST(bootstd_test_luks_detect, UTF_DM | UTF_SCAN_FDT | UTF_CONSOLE);
+
+/* Test LUKS command on mmc11 partitions */
+static int bootstd_test_luks_cmd(struct unit_test_state *uts)
+{
+	struct udevice *mmc;
+
+	ut_assertok(setup_mmc11(uts, &mmc));
+
+	/* Test partition 1 - should NOT be LUKS */
+	ut_asserteq(1, run_command("luks detect mmc b:1", 0));
+	ut_assert_nextlinen("Not a LUKS partition (error -");
+	ut_assert_console_end();
+
+	/* Test partition 2 - should BE LUKS */
+	ut_assertok(run_command("luks detect mmc b:2", 0));
+	ut_assert_nextline("LUKS1 encrypted partition detected");
+	ut_assert_console_end();
+
+	return 0;
+}
+BOOTSTD_TEST(bootstd_test_luks_cmd, UTF_DM | UTF_SCAN_FDT | UTF_CONSOLE);
+
+/* Test LUKS info command on mmc11 partition 2 */
+static int bootstd_test_luks_info(struct unit_test_state *uts)
+{
+	struct udevice *mmc;
+
+	ut_assertok(setup_mmc11(uts, &mmc));
+
+	/* Test partition 2 LUKS info */
+	ut_assertok(run_command("luks info mmc b:2", 0));
+	ut_assert_nextline("Version:        1");
+	ut_assert_nextlinen("Cipher name:");
+	ut_assert_nextlinen("Cipher mode:");
+	ut_assert_nextlinen("Hash spec:");
+	ut_assert_nextlinen("Payload offset:");
+	ut_assert_nextlinen("Key bytes:");
+	ut_assert_console_end();
+
+	return 0;
+}
+BOOTSTD_TEST(bootstd_test_luks_info, UTF_DM | UTF_SCAN_FDT | UTF_CONSOLE);

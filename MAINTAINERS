@@ -1340,6 +1340,8 @@ LUKS
 M:	Simon Glass <sjg@chromium.org>
 S:	Maintained
 T:	git https://concept.u-boot.org/u-boot/u-boot.git
+F:	cmd/luks.c
+F:	doc/usage/cmd/luks.rst
 F:	drivers/block/luks.c
 F:	include/luks.h
 F:	test/boot/luks.c
