@@ -11,6 +11,7 @@ endif
 
 ifndef CONFIG_XPL_BUILD
 obj-$(CONFIG_IDE) += ide.o
+obj-$(CONFIG_BLK_LUKS) += luks.o
 obj-$(CONFIG_RKMTD) += rkmtd.o
 endif
 obj-$(CONFIG_SANDBOX) += sandbox.o host-uclass.o host_dev.o

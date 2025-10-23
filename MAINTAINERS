@@ -1336,6 +1336,14 @@ F:	lib/getopt.c
 F:	test/log/
 F:	test/py/tests/test_log.py
 
+LUKS
+M:	Simon Glass <sjg@chromium.org>
+S:	Maintained
+T:	git https://concept.u-boot.org/u-boot/u-boot.git
+F:	drivers/block/luks.c
+F:	include/luks.h
+F:	test/boot/luks.c
+
 M680X0 ARCHITECTURE
 M:	Kuan-Wei Chiu <visitorckw@gmail.com>
 S:	Maintained

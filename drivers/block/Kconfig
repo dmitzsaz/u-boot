@@ -272,3 +272,24 @@ config RKMTD
 	  Enable "rkmtd" class and driver to create a virtual block device
 	  to transfer Rockchip boot block data to and from NAND with block
 	  orientate tools like "ums" and "rockusb".
+
+config BLK_LUKS
+	bool "Enable LUKS detection and decryption support"
+	depends on BLK && MBEDTLS_LIB
+	select BLKMAP
+	select AES
+	select SHA256
+	select PBKDF2
+	select PKCS5_MBEDTLS if MBEDTLS_LIB_CRYPTO
+	help
+	  This provides support for detecting and decrypting LUKS (Linux Unified
+	  Key Setup) encrypted partitions. LUKS is a disk encryption specification
+	  used for full disk encryption on Linux systems.
+
+	  This option enables detection of both LUKS1 and LUKS2 encrypted
+	  partitions by checking for the LUKS magic bytes and version
+	  information in the partition header.
+
+	  LUKS1 decryption is supported using PBKDF2 key derivation and AES-CBC.
+	  Decrypted partitions can be accessed transparently through the blkmap
+	  device layer.
