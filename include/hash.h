@@ -10,6 +10,15 @@
 #include <linux/kconfig.h>
 #endif
 
+#if !defined(USE_HOSTCC) && CONFIG_IS_ENABLED(MBEDTLS_LIB)
+#include <mbedtls_options.h>
+#include <mbedtls/md.h>
+
+#define HASH_MBEDTLS_TYPE(_val)	.md_type	= _val,
+#else
+#define HASH_MBEDTLS_TYPE(_val)
+#endif
+
 struct cmd_tbl;
 
 /*
@@ -44,6 +53,9 @@ struct hash_algo {
 	void (*hash_func_ws)(const unsigned char *input, unsigned int ilen,
 		unsigned char *output, unsigned int chunk_sz);
 	int chunk_size;				/* Watchdog chunk size */
+#if !defined(USE_HOSTCC) && CONFIG_IS_ENABLED(MBEDTLS_LIB)
+	mbedtls_md_type_t md_type;		/* mbedtls hash type */
+#endif
 	/*
 	 * hash_init: Create the context for progressive hashing
 	 *
@@ -120,7 +132,26 @@ int hash_command(const char *algo_name, int flags, struct cmd_tbl *cmdtp,
 int hash_block(const char *algo_name, const void *data, unsigned int len,
 	       uint8_t *output, int *output_size);
 
-#endif /* !USE_HOSTCC */
+#if CONFIG_IS_ENABLED(MBEDTLS_LIB)
+static inline mbedtls_md_type_t hash_mbedtls_type(struct hash_algo *algo)
+{
+	return algo->md_type;
+}
+#else
+static inline int hash_mbedtls_type(struct hash_algo *algo)
+{
+	return 0;
+}
+#endif
+
+#else /* USE_HOSTCC*/
+
+static inline int hash_mbedtls_type(struct hash_algo *algo)
+{
+	return 0;
+}
+
+#endif /* USE_HOSTCC */
 
 /**
  * hash_lookup_algo() - Look up the hash_algo struct for an algorithm
