@@ -35,6 +35,8 @@ mbedtls_lib_crypto-$(CONFIG_$(PHASE_)SHA512_MBEDTLS) += \
 	$(MBEDTLS_LIB_DIR)/sha512.o
 mbedtls_lib_crypto-$(CONFIG_$(PHASE_)HKDF_MBEDTLS) += \
 	$(MBEDTLS_LIB_DIR)/hkdf.o
+mbedtls_lib_crypto-$(CONFIG_$(PHASE_)PKCS5_MBEDTLS) += \
+	$(MBEDTLS_LIB_DIR)/pkcs5.o
 
 # MbedTLS X509 library
 obj-$(CONFIG_$(XPL_)MBEDTLS_LIB_X509) += mbedtls_lib_x509.o

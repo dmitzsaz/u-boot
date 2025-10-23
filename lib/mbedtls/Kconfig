@@ -231,6 +231,13 @@ config HKDF_MBEDTLS
 	  This option enables support of key derivation using HKDF algorithm
 	  with MbedTLS crypto library.
 
+config PKCS5_MBEDTLS
+	bool "Enable PKCS#5 support with MbedTLS crypto library"
+	depends on MBEDTLS_LIB_CRYPTO
+	help
+	  This option enables support of PKCS#5 functions (PBKDF2) with
+	  MbedTLS crypto library. Required for LUKS decryption.
+
 endif # MBEDTLS_LIB_CRYPTO
 
 config MBEDTLS_LIB_X509
@@ -488,6 +495,13 @@ config SPL_HKDF_MBEDTLS
 	help
 	  This option enables support of key derivation using HKDF algorithm
 	  with MbedTLS crypto library in SPL.
+
+config SPL_PKCS5_MBEDTLS
+	bool "Enable PKCS#5 support with MbedTLS crypto library (SPL)"
+	depends on SPL_MBEDTLS_LIB_CRYPTO
+	help
+	  This option enables support of PKCS#5 functions (PBKDF2) with
+	  MbedTLS crypto library in SPL. Required for LUKS decryption.
 
 endif # SPL_MBEDTLS_LIB_CRYPTO
 
