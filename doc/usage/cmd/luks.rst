@@ -106,6 +106,35 @@ Display LUKS header information for a LUKS2 partition::
     Label:
     Checksum alg:   sha256
 
+    JSON metadata (12288 bytes):
+    {
+      "keyslots": {
+        "0": {
+          "type": "luks2",
+          "key_size": 64,
+          "kdf": {
+            "type": "argon2id",
+            "time": 6,
+            "memory": 1048576,
+            "cpus": 4,
+            ...
+          },
+          ...
+        }
+      },
+      "tokens": {},
+      "segments": {
+        "0": {
+          "type": "crypt",
+          "offset": "16777216",
+          "encryption": "aes-xts-plain64",
+          ...
+        }
+      },
+      "digests": { ... },
+      "config": { ... }
+    }
+
 Display LUKS header information for a LUKS1 partition::
 
     => luks info mmc 1:1

@@ -8,6 +8,7 @@
 #include <blk.h>
 #include <dm.h>
 #include <hexdump.h>
+#include <json.h>
 #include <log.h>
 #include <luks.h>
 #include <memalign.h>
@@ -103,6 +104,28 @@ int luks_show_info(struct udevice *blk, struct disk_partition *pinfo)
 		printf("UUID:           %.40s\n", luks2_hdr->uuid);
 		printf("Label:          %.48s\n", luks2_hdr->label);
 		printf("Checksum alg:   %.32s\n", luks2_hdr->csum_alg);
+
+		if (IS_ENABLED(CONFIG_JSON)) {
+			u64 json_size;
+			char *json_start;
+			int blocks;
+
+			/* Read the full header to get JSON area */
+			blocks = (hdr_size + desc->blksz - 1) / desc->blksz;
+			ALLOC_CACHE_ALIGN_BUFFER(unsigned char, full_hdr, blocks * desc->blksz);
+
+			if (blk_read(blk, pinfo->start, blocks, full_hdr) != blocks) {
+				printf("Error: failed to read full LUKS2 header\n");
+				return -EIO;
+			}
+
+			/* JSON starts after the 4096-byte binary header */
+			json_start = (char *)(full_hdr + 4096);
+			json_size = hdr_size - 4096;
+
+			printf("\nJSON metadata (%llx bytes):\n", json_size);
+			json_print_pretty(json_start, (int)json_size);
+		}
 	} else {
 		printf("Unknown LUKS version\n");
 		return -EPROTONOSUPPORT;
