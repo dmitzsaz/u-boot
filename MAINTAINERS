@@ -1344,7 +1344,10 @@ F:	cmd/luks.c
 F:	doc/usage/cmd/luks.rst
 F:	drivers/block/luks.c
 F:	include/luks.h
+F:	include/json.h
+F:	lib/json.c
 F:	test/boot/luks.c
+F:	test/lib/json.c
 
 M680X0 ARCHITECTURE
 M:	Kuan-Wei Chiu <visitorckw@gmail.com>

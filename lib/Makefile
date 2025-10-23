@@ -34,6 +34,7 @@ obj-$(CONFIG_CIRCBUF) += circbuf.o
 
 obj-y += crc8.o
 obj-$(CONFIG_ERRNO_STR) += errno_str.o
+obj-$(CONFIG_JSON) += json.o
 obj-$(CONFIG_FIT) += fdtdec_common.o
 obj-$(CONFIG_TEST_FDTDEC) += fdtdec_test.o
 obj-$(CONFIG_GZIP_COMPRESSED) += gzip.o

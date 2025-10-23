@@ -1026,6 +1026,13 @@ config GETOPT
 	help
 	  This enables functions for parsing command-line options.
 
+config JSON
+	bool "Enable JSON parsing and printing"
+	help
+	  This enables JSON (JavaScript Object Notation) parsing and pretty-
+	  printing functions. JSON is used for structured data representation,
+	  such as LUKS2 metadata.
+
 config OF_LIBFDT
 	bool "Enable the FDT library"
 	default y if OF_CONTROL
