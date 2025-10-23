@@ -137,4 +137,39 @@ int luks_get_version(struct udevice *blk, struct disk_partition *pinfo);
  */
 int luks_show_info(struct udevice *blk, struct disk_partition *pinfo);
 
+/**
+ * luks_unlock() - Unlock a LUKS partition with a passphrase
+ *
+ * This attempts to decrypt the master key using the provided passphrase.
+ * Currently only supports LUKS1 with PBKDF2 and AES-CBC.
+ *
+ * @blk:	Block device
+ * @pinfo:	Partition information
+ * @passphrase:	Passphrase to unlock the partition
+ * @master_key:	Buffer to receive the decrypted master key
+ * @key_size:	Size of the master_key buffer
+ * Return:	0 on success, -ve on error
+ */
+int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
+		const char *passphrase, u8 *master_key, u32 *key_size);
+
+/**
+ * luks_create_blkmap() - Create a blkmap device for a LUKS partition
+ *
+ * This creates and configures a blkmap device to provide access to the
+ * decrypted contents of a LUKS partition. The master key must already be
+ * unlocked using luks_unlock().
+ *
+ * @blk:	Block device containing the LUKS partition
+ * @pinfo:	Partition information
+ * @master_key:	Unlocked master key
+ * @key_size:	Size of the master key in bytes
+ * @label:	Label for the blkmap device
+ * @blkmap_dev:	Output pointer for created blkmap device
+ * Return:	0 on success, -ve on error
+ */
+int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
+		       const u8 *master_key, u32 key_size, const char *label,
+		       struct udevice **blkmap_dev);
+
 #endif /* __LUKS_H__ */
