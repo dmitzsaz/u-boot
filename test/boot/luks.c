@@ -213,3 +213,29 @@ static int bootstd_test_luks2_info(struct unit_test_state *uts)
 	return 0;
 }
 BOOTSTD_TEST(bootstd_test_luks2_info, UTF_DM | UTF_SCAN_FDT | UTF_CONSOLE);
+
+/* Test LUKS unlock command with LUKS1 encrypted partition */
+static int bootstd_test_luks_unlock(struct unit_test_state *uts)
+{
+	struct udevice *mmc;
+
+	ut_assertok(setup_mmc11(uts, &mmc));
+
+	/* Test that unlock command exists and handles errors properly */
+	/* Should fail because partition 1 is not LUKS */
+	ut_asserteq(1, run_command("luks unlock mmc b:1 test", 0));
+	ut_assert_nextline("Not a LUKS partition");
+	ut_assert_console_end();
+
+	/* Test unlocking partition 2 with correct passphrase */
+	ut_assertok(run_command("luks unlock mmc b:2 test", 0));
+	ut_assert_nextline("Unlocked LUKS partition as blkmap device 'luks-mmc-b:2'");
+	ut_assert_console_end();
+
+	/* Test unlocking with wrong passphrase */
+	ut_asserteq(1, run_command("luks unlock mmc b:2 wrongpass", 0));
+	ut_assert_skip_to_line("Failed to unlock LUKS partition (err -13: Permission denied)");
+
+	return 0;
+}
+BOOTSTD_TEST(bootstd_test_luks_unlock, UTF_DM | UTF_SCAN_FDT | UTF_CONSOLE);
