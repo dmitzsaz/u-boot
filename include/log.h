@@ -188,6 +188,22 @@ int _log_buffer(enum log_category_t cat, enum log_level_t level,
 #define log_io(_fmt...)		log(LOG_CATEGORY, LOGL_DEBUG_IO, ##_fmt)
 #define log_cont(_fmt...)	log(LOGC_CONT, LOGL_CONT, ##_fmt)
 
+/**
+ * log_debug_hex() - Print hex bytes for debugging
+ *
+ * @_label: Label to print before the hex bytes
+ * @_data: Pointer to the data to print
+ * @_len: Number of bytes to print
+ */
+#define log_debug_hex(_label, _data, _len) do { \
+	const u8 *__data = (const u8 *)(_data); \
+	int __len = (_len); \
+	log_debug("%s ", _label); \
+	for (int __i = 0; __i < __len; __i++) \
+		log_cont("%02x", __data[__i]); \
+	log_cont("\n"); \
+} while (0)
+
 #ifdef LOG_DEBUG
 #define _LOG_DEBUG	LOGL_FORCE_DEBUG
 #ifndef DEBUG
