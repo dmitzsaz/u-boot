@@ -57,7 +57,7 @@ For LUKS1 partitions, the following information is displayed:
 
 * Version number
 * Cipher name (encryption algorithm)
-* Cipher mode (e.g., xts-plain64)
+* Cipher mode (e.g., cbc-essiv:sha256)
 * Hash specification (e.g., sha256)
 * Payload offset (in sectors)
 * Key bytes (key size)
@@ -88,24 +88,35 @@ dev[:part]
 luks unlock
 ~~~~~~~~~~~
 
-Unlock a LUKS1 encrypted partition using a passphrase. This command:
+Unlock a LUKS encrypted partition using a passphrase. This command:
 
-1. Verifies the partition is LUKS1 encrypted
-2. Derives the encryption key using PBKDF2 with the provided passphrase
-3. Attempts to unlock each active key slot
-4. Verifies the master key against the stored digest
-5. Creates a blkmap device providing on-the-fly decryption
+1. Verifies the partition is LUKS encrypted (LUKS1 or LUKS2)
+2. Parses LUKS2 JSON metadata (if LUKS2) using FDT conversion
+3. Derives the encryption key using PBKDF2 or Argon2id with the provided
+   passphrase
+4. Attempts to unlock each active key slot
+5. Verifies the master key against the stored digest
+6. Creates a blkmap device providing on-the-fly decryption
 
 After successful unlock, the decrypted data is accessible through a blkmap
 device (typically ``blkmap 0``). Standard U-Boot filesystem commands can then
 be used to access files on the unlocked partition.
 
-**Currently only LUKS1 is supported for unlocking. LUKS2 unlock is not yet
-implemented.**
+**Supported LUKS versions:**
 
-Supported cipher modes:
+* LUKS1 (fully supported)
+* LUKS2 (fully supported with PBKDF2 and Argon2id key derivation)
 
-* aes-cbc-essiv:sha256 (AES in CBC mode with ESSIV)
+**Supported cipher modes:**
+
+* **LUKS1**: aes-cbc-essiv:sha256 (AES in CBC mode with ESSIV)
+* **LUKS2**: aes-cbc-essiv:sha256 and aes-xts-plain64 (AES-XTS, modern default)
+
+**Supported key derivation functions:**
+
+* **PBKDF2**: Traditional password-based key derivation (LUKS1 and LUKS2)
+* **Argon2id**: Memory-hard KDF resistant to GPU attacks (LUKS2 only, requires 
+  CONFIG_ARGON2)
 
 interface
     The storage interface type (e.g., mmc, usb, scsi)
@@ -165,7 +176,7 @@ Display LUKS header information for a LUKS2 partition::
         "0": {
           "type": "crypt",
           "offset": "16777216",
-          "encryption": "aes-xts-plain64",
+          "encryption": "aes-cbc-essiv:sha256",
           ...
         }
       },
@@ -232,9 +243,16 @@ For LUKS unlock functionality, additional options are required::
     CONFIG_BLK_LUKS=y
     CONFIG_CMD_LUKS=y
     CONFIG_BLKMAP=y      # For blkmap device support
+    CONFIG_JSON=y        # For LUKS2 JSON metadata parsing (auto-selected by
+                         # CONFIG_BLK_LUKS)
     CONFIG_AES=y         # For AES encryption
     CONFIG_SHA256=y      # For SHA-256 hashing
     CONFIG_PBKDF2=y      # For PBKDF2 key derivation
+    CONFIG_MBEDTLS_LIB=y # For AES-XTS and mbedTLS crypto (LUKS2)
+
+For Argon2id support (modern LUKS2 KDF)::
+
+    CONFIG_ARGON2=y      # Argon2 password hashing (adds ~50KB to binary)
 
 Return value
 ------------
