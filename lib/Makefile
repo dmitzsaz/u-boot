@@ -85,6 +85,7 @@ obj-$(CONFIG_$(PHASE_)SHA512_LEGACY) += sha512.o
 obj-$(CONFIG_$(PHASE_)SM3) += sm3.o
 
 obj-$(CONFIG_CRYPT_PW) += crypt/
+obj-$(CONFIG_ARGON2) += argon2/
 obj-$(CONFIG_$(PHASE_)ASN1_DECODER_LEGACY) += asn1_decoder.o
 
 obj-$(CONFIG_$(PHASE_)ZLIB) += zlib/

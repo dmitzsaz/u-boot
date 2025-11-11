@@ -570,11 +570,12 @@ menu "Hashing Support"
 
 config BLAKE2
 	bool "Enable BLAKE2 support"
+	depends on !ARGON2
 	help
 	  This option enables support of hashing using BLAKE2B algorithm.
 	  The hash is calculated in software.
 	  The BLAKE2 algorithm produces a hash value (digest) between 1 and
-	  64 bytes.
+	  64 bytes. Note: ARGON2 includes its own BLAKE2 implementation.
 
 config SHA1
 	bool "Enable SHA1 support"
@@ -1032,6 +1033,17 @@ config JSON
 	  This enables JSON (JavaScript Object Notation) parsing and pretty-
 	  printing functions. JSON is used for structured data representation,
 	  such as LUKS2 metadata.
+
+config ARGON2
+	bool "Enable Argon2 password hashing"
+	help
+	  This enables the Argon2 password hashing algorithm, winner of the
+	  Password Hashing Competition (PHC). Argon2 is used for key derivation
+	  in LUKS2 encrypted volumes. It provides better resistance to GPU
+	  cracking attacks compared to PBKDF2.
+
+	  Note: This option includes its own BLAKE2 implementation and is
+	  mutually exclusive with CONFIG_BLAKE2.
 
 config OF_LIBFDT
 	bool "Enable the FDT library"
