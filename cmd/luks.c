@@ -85,10 +85,7 @@ static int do_luks_unlock(struct cmd_tbl *cmdtp, int flag, int argc,
 		return CMD_RET_FAILURE;
 	}
 
-	if (version != LUKS_VERSION_1) {
-		printf("Only LUKS1 is currently supported\n");
-		return CMD_RET_FAILURE;
-	}
+	printf("Unlocking LUKS%d partition...\n", version);
 
 	/* Unlock the partition to get the master key */
 	ret = luks_unlock(dev_desc->bdev, &info, passphrase, master_key,
