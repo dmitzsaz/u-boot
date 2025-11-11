@@ -145,13 +145,13 @@ int luks_show_info(struct udevice *blk, struct disk_partition *pinfo);
  *
  * @blk:	Block device
  * @pinfo:	Partition information
- * @passphrase:	Passphrase to unlock the partition
+ * @pass:	Passphrase to unlock the partition
  * @master_key:	Buffer to receive the decrypted master key
  * @key_size:	Size of the master_key buffer
  * Return:	0 on success, -ve on error
  */
 int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
-		const char *passphrase, u8 *master_key, u32 *key_size);
+		const char *pass, u8 *master_key, u32 *key_size);
 
 /**
  * luks_create_blkmap() - Create a blkmap device for a LUKS partition
