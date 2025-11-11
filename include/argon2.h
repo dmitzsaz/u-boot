@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 OR CC0-1.0 */
 /*
  * Argon2 reference source code package - reference C implementations
  *
@@ -18,9 +19,19 @@
 #ifndef ARGON2_H
 #define ARGON2_H
 
-#include <stdint.h>
-#include <stddef.h>
+#include <linux/types.h>
 #include <limits.h>
+
+/* U-Boot: Define missing integer constant macros */
+#ifndef UINT32_C
+#define UINT32_C(c) c ## U
+#endif
+#ifndef UINT64_C
+#define UINT64_C(c) c ## ULL
+#endif
+
+/* U-Boot: Disable threading */
+#define ARGON2_NO_THREADS
 
 #if defined(__cplusplus)
 extern "C" {

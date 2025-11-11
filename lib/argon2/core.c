@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR CC0-1.0
 /*
  * Argon2 reference source code package - reference C implementations
  *
@@ -15,31 +16,13 @@
  * software. If not, they may be obtained at the above URLs.
  */
 
-/*For memory wiping*/
-#ifdef _WIN32
-#include <windows.h>
-#include <winbase.h> /* For SecureZeroMemory */
-#endif
-#if defined __STDC_LIB_EXT1__
-#define __STDC_WANT_LIB_EXT1__ 1
-#endif
-#define VC_GE_2005(version) (version >= 1400)
-
-/* for explicit_bzero() on glibc */
-#define _DEFAULT_SOURCE
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+/* U-Boot includes */
+#include <linux/string.h>
+#include <malloc.h>
 
 #include "core.h"
-#include "thread.h"
 #include "blake2/blake2.h"
 #include "blake2/blake2-impl.h"
-
-#ifdef GENKAT
-#include "genkat.h"
-#endif
 
 #if defined(__clang__)
 #if __has_attribute(optnone)
@@ -123,25 +106,10 @@ void free_memory(const argon2_context *context, uint8_t *memory,
     }
 }
 
-#if defined(__OpenBSD__)
-#define HAVE_EXPLICIT_BZERO 1
-#elif defined(__GLIBC__) && defined(__GLIBC_PREREQ)
-#if __GLIBC_PREREQ(2,25)
-#define HAVE_EXPLICIT_BZERO 1
-#endif
-#endif
-
 void NOT_OPTIMIZED secure_wipe_memory(void *v, size_t n) {
-#if defined(_MSC_VER) && VC_GE_2005(_MSC_VER) || defined(__MINGW32__)
-    SecureZeroMemory(v, n);
-#elif defined memset_s
-    memset_s(v, n, 0, n);
-#elif defined(HAVE_EXPLICIT_BZERO)
-    explicit_bzero(v, n);
-#else
+    /* Use volatile pointer to prevent compiler optimization */
     static void *(*const volatile memset_sec)(void *, int, size_t) = &memset;
     memset_sec(v, 0, n);
-#endif
 }
 
 /* Memory clear flag defaults to true. */

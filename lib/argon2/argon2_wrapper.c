@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR CC0-1.0
 /*
  * Argon2 reference source code package - reference C implementations
  *
@@ -15,12 +16,12 @@
  * software. If not, they may be obtained at the above URLs.
  */
 
-#include <string.h>
-#include <stdlib.h>
-#include <stdio.h>
+/* U-Boot: Use U-Boot headers */
+#include <linux/string.h>
+#include <linux/types.h>
+#include <malloc.h>
 
 #include "argon2.h"
-#include "encoding.h"
 #include "core.h"
 
 const char *argon2_type2string(argon2_type type, int uppercase) {
@@ -161,6 +162,15 @@ int argon2_hash(const uint32_t t_cost, const uint32_t m_cost,
         memcpy(hash, out, hashlen);
     }
 
+    /* U-Boot: encoding not supported (requires encoding.c) */
+#ifdef __UBOOT__
+    /* Return error if encoding requested */
+    if (encoded && encodedlen) {
+        clear_internal_memory(out, hashlen);
+        free(out);
+        return ARGON2_ENCODING_FAIL;
+    }
+#else
     /* if encoding requested, write it */
     if (encoded && encodedlen) {
         if (encode_string(encoded, encodedlen, &context, type) != ARGON2_OK) {
@@ -170,6 +180,7 @@ int argon2_hash(const uint32_t t_cost, const uint32_t m_cost,
             return ARGON2_ENCODING_FAIL;
         }
     }
+#endif
     clear_internal_memory(out, hashlen);
     free(out);
 
@@ -236,6 +247,8 @@ int argon2id_hash_raw(const uint32_t t_cost, const uint32_t m_cost,
                        ARGON2_VERSION_NUMBER);
 }
 
+/* U-Boot: verify functions not needed */
+#ifndef __UBOOT__
 static int argon2_compare(const uint8_t *b1, const uint8_t *b2, size_t len) {
     size_t i;
     uint8_t d = 0U;
@@ -364,6 +377,7 @@ int argon2i_verify_ctx(argon2_context *context, const char *hash) {
 int argon2id_verify_ctx(argon2_context *context, const char *hash) {
     return argon2_verify_ctx(context, hash, Argon2_id);
 }
+#endif /* U-Boot: verify functions */
 
 const char *argon2_error_message(int error_code) {
     switch (error_code) {
@@ -444,9 +458,12 @@ const char *argon2_error_message(int error_code) {
     }
 }
 
+/* U-Boot: encodedlen not needed */
+#ifndef __UBOOT__
 size_t argon2_encodedlen(uint32_t t_cost, uint32_t m_cost, uint32_t parallelism,
                          uint32_t saltlen, uint32_t hashlen, argon2_type type) {
   return strlen("$$v=$m=,t=,p=$$") + strlen(argon2_type2string(type, 0)) +
          numlen(t_cost) + numlen(m_cost) + numlen(parallelism) +
          b64len(saltlen) + b64len(hashlen) + numlen(ARGON2_VERSION_NUMBER) + 1;
 }
+#endif /* U-Boot: encodedlen */

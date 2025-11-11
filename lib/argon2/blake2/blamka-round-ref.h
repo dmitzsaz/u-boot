@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 OR CC0-1.0 */
 /*
  * Argon2 reference source code package - reference C implementations
  *

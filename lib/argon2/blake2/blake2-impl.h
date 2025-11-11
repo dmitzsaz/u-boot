@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 OR CC0-1.0 */
 /*
  * Argon2 reference source code package - reference C implementations
  *
@@ -18,12 +19,11 @@
 #ifndef PORTABLE_BLAKE2_IMPL_H
 #define PORTABLE_BLAKE2_IMPL_H
 
-#include <stdint.h>
-#include <string.h>
+/* U-Boot includes */
+#include <linux/types.h>
+#include <linux/string.h>
 
-#ifdef _WIN32
-#define BLAKE2_INLINE __inline
-#elif defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__)
 #define BLAKE2_INLINE __inline__
 #else
 #define BLAKE2_INLINE

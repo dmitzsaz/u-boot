@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR CC0-1.0
 /*
  * Argon2 reference source code package - reference C implementations
  *
@@ -15,9 +16,9 @@
  * software. If not, they may be obtained at the above URLs.
  */
 
-#include <stdint.h>
-#include <string.h>
-#include <stdlib.h>
+/* U-Boot includes */
+#include <linux/types.h>
+#include <linux/string.h>
 
 #include "argon2.h"
 #include "core.h"
