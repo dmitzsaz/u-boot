@@ -27,4 +27,17 @@
 int af_merge(const u8 *src, u8 *dst, size_t key_size, uint stripes,
 	     const char *hash_spec);
 
+/**
+ * unlock_luks2() - Unlock a LUKS2 partition with a passphrase
+ *
+ * @blk:	Block device
+ * @pinfo:	Partition information
+ * @pass:	Passphrase to unlock the partition
+ * @master_key:	Buffer to receive the decrypted master key
+ * @key_sizep:	Returns the key size
+ * Return:	0 on success, -ve on error
+ */
+int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
+		 const char *pass, u8 *master_key, uint *key_sizep);
+
 #endif /* __LUKS_INTERNAL_H__ */

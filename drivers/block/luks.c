@@ -8,6 +8,7 @@
 #include <blk.h>
 #include <blkmap.h>
 #include <dm.h>
+#include <dm/ofnode.h>
 #include <hash.h>
 #include <hexdump.h>
 #include <json.h>
@@ -21,6 +22,8 @@
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/string.h>
+#include <mbedtls/aes.h>
+#include <mbedtls/cipher.h>
 #include <mbedtls/md.h>
 #include <mbedtls/pkcs5.h>
 #include <u-boot/sha256.h>
@@ -476,6 +479,9 @@ int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
 	}
 
 	version = be16_to_cpu(*(__be16 *)(buffer + LUKS_MAGIC_LEN));
+	if (version == LUKS_VERSION_2)
+		return unlock_luks2(blk, pinfo, pass, master_key, key_size);
+
 	if (version != LUKS_VERSION_1) {
 		log_debug("unsupported LUKS version %d\n", version);
 		return -ENOTSUPP;
@@ -591,11 +597,12 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 {
 	u8 essiv_key[SHA256_SUM_LEN];  /* SHA-256 output */
 	struct luks1_phdr *hdr;
+	struct luks2_hdr *hdr2;
 	struct blk_desc *desc;
 	struct udevice *dev;
 	uint payload_offset;
+	int ret, version;
 	bool use_essiv;
-	int ret;
 
 	if (!blk || !pinfo || !master_key || !label || !blkmapp)
 		return -EINVAL;
@@ -608,7 +615,107 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		log_debug("failed to read LUKS header\n");
 		return -EIO;
 	}
-	hdr = (struct luks1_phdr *)buf;
+
+	/* Check version */
+	version = be16_to_cpu(*(__be16 *)(buf + LUKS_MAGIC_LEN));
+
+	if (version == LUKS_VERSION_2) {
+		/* LUKS2: Parse JSON for segment offset */
+		char *json_data;
+		u64 hdr_size, segment_offset;
+		int blocks;
+		struct abuf fdt_buf;
+		oftree tree;
+		ofnode root, segments_node, segment0_node;
+		const char *offset_str, *encryption;
+
+		abuf_init(&fdt_buf);
+
+		hdr2 = (struct luks2_hdr *)buf;
+		hdr_size = be64_to_cpu(hdr2->hdr_size);
+
+		/* Read full header with JSON */
+		blocks = (hdr_size + desc->blksz - 1) / desc->blksz;
+		json_data = malloc_cache_aligned(blocks * desc->blksz);
+		if (!json_data)
+			return -ENOMEM;
+
+		if (blk_read(blk, pinfo->start, blocks, json_data) != blocks) {
+			free(json_data);
+			return -EIO;
+		}
+
+		/* Convert JSON to FDT */
+		ret = json_to_fdt(json_data + 4096, &fdt_buf);
+		if (ret) {
+			log_err("Failed to convert JSON to FDT: %d\n", ret);
+			free(json_data);
+			return -EINVAL;
+		}
+
+		/* Create oftree from FDT */
+		tree = oftree_from_fdt(abuf_data(&fdt_buf));
+		if (!oftree_valid(tree)) {
+			abuf_uninit(&fdt_buf);
+			free(json_data);
+			return -EINVAL;
+		}
+
+		/* Get root node */
+		root = oftree_root(tree);
+		if (!ofnode_valid(root)) {
+			abuf_uninit(&fdt_buf);
+			free(json_data);
+			return -EINVAL;
+		}
+
+		/* Navigate to segments node */
+		segments_node = ofnode_find_subnode(root, "segments");
+		if (!ofnode_valid(segments_node)) {
+			abuf_uninit(&fdt_buf);
+			free(json_data);
+			return -EINVAL;
+		}
+
+		/* Get first segment (segment 0) */
+		segment0_node = ofnode_find_subnode(segments_node, "0");
+		if (!ofnode_valid(segment0_node)) {
+			abuf_uninit(&fdt_buf);
+			free(json_data);
+			return -EINVAL;
+		}
+
+		/* Get offset (string in LUKS2 JSON) */
+		offset_str = ofnode_read_string(segment0_node, "offset");
+		if (!offset_str) {
+			abuf_uninit(&fdt_buf);
+			free(json_data);
+			return -EINVAL;
+		}
+		segment_offset = simple_strtoull(offset_str, NULL, 10);
+
+		/* Convert byte offset to sectors */
+		payload_offset = segment_offset / desc->blksz;
+
+		/* Check if ESSIV mode is used */
+		encryption = ofnode_read_string(segment0_node, "encryption");
+		if (encryption)
+			use_essiv = strstr(encryption, "essiv");
+		else
+			use_essiv = false;
+
+		abuf_uninit(&fdt_buf);
+		free(json_data);
+	} else {
+		/* LUKS1 */
+		hdr = (struct luks1_phdr *)buf;
+
+		/* Check if ESSIV mode is used */
+		use_essiv = strstr(hdr->cipher_mode, "essiv");
+
+		/* Get payload offset */
+		payload_offset = be32_to_cpu(hdr->payload_offset);
+	}
 
 	/* Create blkmap device */
 	ret = blkmap_create(label, &dev);
@@ -617,9 +724,7 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		return ret;
 	}
 
-	/* Check if ESSIV mode is used */
-	use_essiv = strstr(hdr->cipher_mode, "essiv");
-
+	/* Compute ESSIV key if needed */
 	if (use_essiv) {
 		int hash_size = SHA256_SUM_LEN;
 
@@ -632,7 +737,6 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 	}
 
 	/* Map the encrypted partition to the blkmap device */
-	payload_offset = be32_to_cpu(hdr->payload_offset);
 	log_debug("mapping blkmap: blknr 0 blkcnt %lx payload_offset %x essiv %d\n",
 		  (ulong)pinfo->size, payload_offset, use_essiv);
 	ret = blkmap_map_crypt(dev, 0, pinfo->size, blk, pinfo->start,
