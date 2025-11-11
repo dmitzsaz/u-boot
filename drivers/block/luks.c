@@ -25,6 +25,7 @@
 #include <mbedtls/pkcs5.h>
 #include <u-boot/sha256.h>
 #include <u-boot/sha512.h>
+#include "luks_internal.h"
 
 int luks_get_version(struct udevice *blk, struct disk_partition *pinfo)
 {
@@ -206,8 +207,8 @@ static int af_hash(struct hash_algo *algo, size_t key_size, u8 *block_buf)
  * @hash_spec:	Hash algorithm name (e.g., "sha256")
  * Return:	0 on success, -ve on error
  */
-static int af_merge(const u8 *src, u8 *dst, size_t key_size, uint stripes,
-		    const char *hash_spec)
+int af_merge(const u8 *src, u8 *dst, size_t key_size, uint stripes,
+	     const char *hash_spec)
 {
 	struct hash_algo *algo;
 	u8 block_buf[128];
