@@ -596,6 +596,7 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		       struct udevice **blkmapp)
 {
 	u8 essiv_key[SHA256_SUM_LEN];  /* SHA-256 output */
+	lbaint_t decrypted_size;
 	struct luks1_phdr *hdr;
 	struct luks2_hdr *hdr2;
 	struct blk_desc *desc;
@@ -736,10 +737,15 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		}
 	}
 
-	/* Map the encrypted partition to the blkmap device */
-	log_debug("mapping blkmap: blknr 0 blkcnt %lx payload_offset %x essiv %d\n",
-		  (ulong)pinfo->size, payload_offset, use_essiv);
-	ret = blkmap_map_crypt(dev, 0, pinfo->size, blk, pinfo->start,
+	/*
+	 * Map the encrypted partition to the blkmap device. The decrypted size
+	 * is the partition size minus the payload offset
+	 */
+	decrypted_size = pinfo->size - payload_offset;
+	log_debug("mapping blkmap: blknr 0 blkcnt %llx payload_offset %x essiv %d\n",
+		  (unsigned long long)decrypted_size, payload_offset,
+		  use_essiv);
+	ret = blkmap_map_crypt(dev, 0, decrypted_size, blk, pinfo->start,
 			       master_key, key_size, payload_offset,
 			       use_essiv, use_essiv ? essiv_key : NULL);
 	if (ret) {
