@@ -141,7 +141,7 @@ int luks_show_info(struct udevice *blk, struct disk_partition *pinfo);
  * luks_unlock() - Unlock a LUKS partition with a passphrase
  *
  * This attempts to decrypt the master key using the provided passphrase.
- * Currently only supports LUKS1 with PBKDF2 and AES-CBC.
+ * Supports LUKS1 (PBKDF2, AES-CBC/XTS) and LUKS2 (PBKDF2/Argon2, AES-XTS).
  *
  * @blk:	Block device
  * @pinfo:	Partition information

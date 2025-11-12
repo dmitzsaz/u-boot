@@ -287,12 +287,9 @@ static int bootstd_test_luks2_unlock(struct unit_test_state *uts)
 	desc = blk_get_devnum_by_uclass_idname("blkmap", 0);
 	ut_assertnonnull(desc);
 
-	/* at present this fails due to incorrect decryption */
-	if (0) {
-		ut_assertok(fs_set_blk_dev_with_part(desc, 0));
-		ut_assertok(fs_size("/bin/bash", &file_size));
-		ut_asserteq(5, file_size);
-	}
+	ut_assertok(fs_set_blk_dev_with_part(desc, 0));
+	ut_assertok(fs_size("/bin/bash", &file_size));
+	ut_asserteq(5, file_size);
 
 	/* Test unlocking with wrong passphrase */
 	ut_asserteq(1, run_command("luks unlock mmc c:2 wrongpass", 0));

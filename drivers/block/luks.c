@@ -596,6 +596,7 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		       struct udevice **blkmapp)
 {
 	u8 essiv_key[SHA256_SUM_LEN];  /* SHA-256 output */
+	enum blkmap_crypt_mode cipher_mode;
 	lbaint_t decrypted_size;
 	struct luks1_phdr *hdr;
 	struct luks2_hdr *hdr2;
@@ -603,6 +604,7 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 	struct udevice *dev;
 	uint payload_offset;
 	int ret, version;
+	u32 sector_size;
 	bool use_essiv;
 
 	if (!blk || !pinfo || !master_key || !label || !blkmapp)
@@ -698,12 +700,26 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		/* Convert byte offset to sectors */
 		payload_offset = segment_offset / desc->blksz;
 
-		/* Check if ESSIV mode is used */
+		/* Parse cipher mode from encryption string */
 		encryption = ofnode_read_string(segment0_node, "encryption");
-		if (encryption)
+		if (encryption) {
 			use_essiv = strstr(encryption, "essiv");
-		else
+			/* Check if XTS mode is used */
+			if (strstr(encryption, "xts"))
+				cipher_mode = BLKMAP_CRYPT_MODE_XTS;
+			else
+				cipher_mode = BLKMAP_CRYPT_MODE_CBC;
+		} else {
 			use_essiv = false;
+			cipher_mode = BLKMAP_CRYPT_MODE_CBC;
+		}
+
+		/* Read sector_size if present */
+		if (ofnode_read_u32(segment0_node, "sector_size", &sector_size)) {
+			/* If not found, default to 512 */
+			sector_size = 512;
+		}
+		log_debug("LUKS2: sector_size=%u\n", sector_size);
 
 		abuf_uninit(&fdt_buf);
 		free(json_data);
@@ -711,11 +727,20 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		/* LUKS1 */
 		hdr = (struct luks1_phdr *)buf;
 
-		/* Check if ESSIV mode is used */
+		/* Parse cipher mode from cipher_mode string */
 		use_essiv = strstr(hdr->cipher_mode, "essiv");
+		/* Check if XTS mode is used */
+		if (strstr(hdr->cipher_mode, "xts"))
+			cipher_mode = BLKMAP_CRYPT_MODE_XTS;
+		else
+			cipher_mode = BLKMAP_CRYPT_MODE_CBC;
 
 		/* Get payload offset */
 		payload_offset = be32_to_cpu(hdr->payload_offset);
+
+		/* LUKS1 always uses 512-byte sectors */
+		sector_size = 512;
+		log_debug("LUKS1: sector_size=%u\n", sector_size);
 	}
 
 	/* Create blkmap device */
@@ -747,7 +772,8 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		  use_essiv);
 	ret = blkmap_map_crypt(dev, 0, decrypted_size, blk, pinfo->start,
 			       master_key, key_size, payload_offset,
-			       use_essiv, use_essiv ? essiv_key : NULL);
+			       cipher_mode, sector_size, use_essiv,
+			       use_essiv ? essiv_key : NULL);
 	if (ret) {
 		log_debug("failed to map encrypted partition\n");
 		blkmap_destroy(dev);
