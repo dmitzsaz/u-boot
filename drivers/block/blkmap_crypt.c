@@ -45,36 +45,16 @@ struct blkmap_crypt {
 	u8 essiv_key[32];
 };
 
-static ulong blkmap_crypt_read(struct blkmap *bm, struct blkmap_slice *bms,
-			       lbaint_t blknr, lbaint_t blkcnt, void *buffer)
+static ulong crypt_read_cbc(struct blkmap *bm, struct blkmap_crypt *bmc,
+			    lbaint_t blknr, lbaint_t blkcnt,
+			    u8 *encrypted_buf, void *buffer)
 {
-	struct blkmap_crypt *bmc = container_of(bms, struct blkmap_crypt, slice);
 	struct blk_desc *bd = dev_get_uclass_plat(bm->blk);
-	struct blk_desc *src_bd = dev_get_uclass_plat(bmc->blk);
-	lbaint_t src_blknr, blocks_read;
-	u8 *encrypted_buf, *dest = buffer;
 	u8 expkey[AES256_EXPAND_KEY_LENGTH];
 	u8 iv[AES_BLOCK_LENGTH];
+	u8 *dest = buffer;
 	u64 sector;
 	lbaint_t i;
-
-	/* Allocate buffer for encrypted data */
-	encrypted_buf = malloc_cache_aligned(blkcnt * src_bd->blksz);
-	if (!encrypted_buf)
-		return 0;
-
-	/*
-	 * Calculate source block number (LUKS payload offset + requested
-	 * block)
-	 */
-	src_blknr = bmc->blknr + bmc->payload_offset + blknr;
-
-	/* Read encrypted data from underlying device */
-	blocks_read = blk_read(bmc->blk, src_blknr, blkcnt, encrypted_buf);
-	if (blocks_read != blkcnt) {
-		free(encrypted_buf);
-		return 0;
-	}
 
 	/* Expand AES key */
 	aes_expand_key(bmc->master_key, bmc->key_size * 8, expkey);
@@ -116,9 +96,46 @@ static ulong blkmap_crypt_read(struct blkmap *bm, struct blkmap_slice *bms,
 				       dest + i * bd->blksz,
 				       bd->blksz / AES_BLOCK_LENGTH);
 	}
-	free(encrypted_buf);
 
 	return blkcnt;
+}
+
+static ulong blkmap_crypt_read(struct blkmap *bm, struct blkmap_slice *bms,
+			       lbaint_t blknr, lbaint_t blkcnt, void *buffer)
+{
+	struct blkmap_crypt *bmc = container_of(bms, struct blkmap_crypt, slice);
+	struct blk_desc *src_bd = dev_get_uclass_plat(bmc->blk);
+	lbaint_t src_blknr, blocks_read;
+	u8 *encrypted_buf;
+	ulong result;
+
+	/* Allocate buffer for encrypted data */
+	encrypted_buf = malloc_cache_aligned(blkcnt * src_bd->blksz);
+	if (!encrypted_buf)
+		return 0;
+
+	/*
+	 * Calculate source block number (LUKS payload offset + requested
+	 * block)
+	 */
+	src_blknr = bmc->blknr + bmc->payload_offset + blknr;
+
+	/* Read encrypted data from underlying device */
+	blocks_read = blk_read(bmc->blk, src_blknr, blkcnt, encrypted_buf);
+	if (blocks_read != blkcnt) {
+		free(encrypted_buf);
+		return 0;
+	}
+
+	if (blknr == 0 && blkcnt >= 1) {
+		log_debug("First 32 bytes of ENCRYPTED data:\n");
+		log_debug_hex("", encrypted_buf, 32);
+	}
+
+	result = crypt_read_cbc(bm, bmc, blknr, blkcnt, encrypted_buf, buffer);
+	free(encrypted_buf);
+
+	return result;
 }
 
 static void blkmap_crypt_destroy(struct blkmap *bm, struct blkmap_slice *bms)
