@@ -46,68 +46,68 @@ enum {
  * Expand a key into a key schedule, which is then used for the other
  * operations.
  *
- * @key		Key
+ * @key		Key (not modified)
  * @key_size	Size of the key (in bits)
  * @expkey	Buffer to place expanded key, AES_EXPAND_KEY_LENGTH
  */
-void aes_expand_key(u8 *key, u32 key_size, u8 *expkey);
+void aes_expand_key(const u8 *key, u32 key_size, u8 *expkey);
 
 /**
  * aes_encrypt() - Encrypt single block of data with AES 128
  *
  * @key_size	Size of the aes key (in bits)
- * @in		Input data
- * @expkey	Expanded key to use for encryption (from aes_expand_key())
+ * @in		Input data (not modified)
+ * @expkey	Expanded key to use for encryption (from aes_expand_key(), not modified)
  * @out		Output data
  */
-void aes_encrypt(u32 key_size, u8 *in, u8 *expkey, u8 *out);
+void aes_encrypt(u32 key_size, const u8 *in, const u8 *expkey, u8 *out);
 
 /**
  * aes_decrypt() - Decrypt single block of data with AES 128
  *
  * @key_size	Size of the aes key (in bits)
- * @in		Input data
- * @expkey	Expanded key to use for decryption (from aes_expand_key())
+ * @in		Input data (not modified)
+ * @expkey	Expanded key to use for decryption (from aes_expand_key(), not modified)
  * @out		Output data
  */
-void aes_decrypt(u32 key_size, u8 *in, u8 *expkey, u8 *out);
+void aes_decrypt(u32 key_size, const u8 *in, const u8 *expkey, u8 *out);
 
 /**
  * Apply chain data to the destination using EOR
  *
  * Each array is of length AES_BLOCK_LENGTH.
  *
- * @cbc_chain_data	Chain data
- * @src			Source data
+ * @cbc_chain_data	Chain data (not modified)
+ * @src			Source data (not modified)
  * @dst			Destination data, which is modified here
  */
-void aes_apply_cbc_chain_data(u8 *cbc_chain_data, u8 *src, u8 *dst);
+void aes_apply_cbc_chain_data(const u8 *cbc_chain_data, const u8 *src, u8 *dst);
 
 /**
  * aes_cbc_encrypt_blocks() - Encrypt multiple blocks of data with AES CBC.
  *
  * @key_size		Size of the aes key (in bits)
- * @key_exp		Expanded key to use
- * @iv			Initialization vector
- * @src			Source data to encrypt
+ * @key_exp		Expanded key to use (not modified)
+ * @iv			Initialization vector (not modified)
+ * @src			Source data to encrypt (not modified)
  * @dst			Destination buffer
  * @num_aes_blocks	Number of AES blocks to encrypt
  */
-void aes_cbc_encrypt_blocks(u32 key_size, u8 *key_exp, u8 *iv, u8 *src, u8 *dst,
-			    u32 num_aes_blocks);
+void aes_cbc_encrypt_blocks(u32 key_size, const u8 *key_exp, const u8 *iv,
+			    const u8 *src, u8 *dst, u32 num_aes_blocks);
 
 /**
  * Decrypt multiple blocks of data with AES CBC.
  *
  * @key_size		Size of the aes key (in bits)
- * @key_exp		Expanded key to use
- * @iv			Initialization vector
- * @src			Source data to decrypt
+ * @key_exp		Expanded key to use (not modified)
+ * @iv			Initialization vector (not modified)
+ * @src			Source data to decrypt (not modified)
  * @dst			Destination buffer
  * @num_aes_blocks	Number of AES blocks to decrypt
  */
-void aes_cbc_decrypt_blocks(u32 key_size, u8 *key_exp, u8 *iv, u8 *src, u8 *dst,
-			    u32 num_aes_blocks);
+void aes_cbc_decrypt_blocks(u32 key_size, const u8 *key_exp, const u8 *iv,
+			    const u8 *src, u8 *dst, u32 num_aes_blocks);
 
 /* An AES block filled with zeros */
 static const u8 AES_ZERO_BLOCK[AES_BLOCK_LENGTH] = { 0 };

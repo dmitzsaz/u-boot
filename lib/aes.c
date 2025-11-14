@@ -498,7 +498,7 @@ static void inv_mix_sub_columns(u8 *state)
  * encrypt/decrypt columns of the key
  * n.b. you can replace this with byte-wise xor if you wish.
  */
-static void add_round_key(u32 *state, u32 *key)
+static void add_round_key(u32 *state, const u32 *key)
 {
 	int idx;
 
@@ -535,7 +535,7 @@ static u32 aes_get_keycols(u32 key_len)
 }
 
 /* produce AES_STATECOLS bytes for each round */
-void aes_expand_key(u8 *key, u32 key_len, u8 *expkey)
+void aes_expand_key(const u8 *key, u32 key_len, u8 *expkey)
 {
 	u8 tmp0, tmp1, tmp2, tmp3, tmp4;
 	u32 idx, aes_rounds, aes_keycols;
@@ -571,7 +571,7 @@ void aes_expand_key(u8 *key, u32 key_len, u8 *expkey)
 }
 
 /* encrypt one 128 bit block */
-void aes_encrypt(u32 key_len, u8 *in, u8 *expkey, u8 *out)
+void aes_encrypt(u32 key_len, const u8 *in, const u8 *expkey, u8 *out)
 {
 	u8 state[AES_STATECOLS * 4];
 	u32 round, aes_rounds;
@@ -594,7 +594,7 @@ void aes_encrypt(u32 key_len, u8 *in, u8 *expkey, u8 *out)
 	memcpy(out, state, sizeof(state));
 }
 
-void aes_decrypt(u32 key_len, u8 *in, u8 *expkey, u8 *out)
+void aes_decrypt(u32 key_len, const u8 *in, const u8 *expkey, u8 *out)
 {
 	u8 state[AES_STATECOLS * 4];
 	int round, aes_rounds;
@@ -617,7 +617,7 @@ void aes_decrypt(u32 key_len, u8 *in, u8 *expkey, u8 *out)
 	memcpy(out, state, sizeof(state));
 }
 
-static void debug_print_vector(char *name, u32 num_bytes, u8 *data)
+static void debug_print_vector(char *name, u32 num_bytes, const u8 *data)
 {
 #ifdef DEBUG
 	printf("%s [%d] @0x%p", name, num_bytes, data);
@@ -625,7 +625,7 @@ static void debug_print_vector(char *name, u32 num_bytes, u8 *data)
 #endif
 }
 
-void aes_apply_cbc_chain_data(u8 *cbc_chain_data, u8 *src, u8 *dst)
+void aes_apply_cbc_chain_data(const u8 *cbc_chain_data, const u8 *src, u8 *dst)
 {
 	int i;
 
@@ -633,11 +633,11 @@ void aes_apply_cbc_chain_data(u8 *cbc_chain_data, u8 *src, u8 *dst)
 		*dst++ = *src++ ^ *cbc_chain_data++;
 }
 
-void aes_cbc_encrypt_blocks(u32 key_len, u8 *key_exp, u8 *iv, u8 *src, u8 *dst,
-			    u32 num_aes_blocks)
+void aes_cbc_encrypt_blocks(u32 key_len, const u8 *key_exp, const u8 *iv,
+			    const u8 *src, u8 *dst, u32 num_aes_blocks)
 {
 	u8 tmp_data[AES_BLOCK_LENGTH];
-	u8 *cbc_chain_data = iv;
+	const u8 *cbc_chain_data = iv;
 	u32 i;
 
 	for (i = 0; i < num_aes_blocks; i++) {
@@ -659,8 +659,8 @@ void aes_cbc_encrypt_blocks(u32 key_len, u8 *key_exp, u8 *iv, u8 *src, u8 *dst,
 	}
 }
 
-void aes_cbc_decrypt_blocks(u32 key_len, u8 *key_exp, u8 *iv, u8 *src, u8 *dst,
-			    u32 num_aes_blocks)
+void aes_cbc_decrypt_blocks(u32 key_len, const u8 *key_exp, const u8 *iv,
+			    const u8 *src, u8 *dst, u32 num_aes_blocks)
 {
 	u8 tmp_data[AES_BLOCK_LENGTH], tmp_block[AES_BLOCK_LENGTH];
 	/* Convenient array of 0's for IV */

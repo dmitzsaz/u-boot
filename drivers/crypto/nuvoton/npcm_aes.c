@@ -102,10 +102,10 @@ static int npcm_aes_init(u8 dec_enc)
 	return 0;
 }
 
-static inline void npcm_aes_load_iv(u8 *iv)
+static inline void npcm_aes_load_iv(const u8 *iv)
 {
 	struct npcm_aes_regs *regs = aes_priv->regs;
-	u32 *p = (u32 *)iv;
+	const u32 *p = (const u32 *)iv;
 	u32 i;
 
 	/* Initialization Vector is loaded in 32-bit chunks */
@@ -113,10 +113,10 @@ static inline void npcm_aes_load_iv(u8 *iv)
 		writel(p[i], &regs->aes_iv_0 + i);
 }
 
-static inline void npcm_aes_load_key(u8 *key)
+static inline void npcm_aes_load_key(const u8 *key)
 {
 	struct npcm_aes_regs *regs = aes_priv->regs;
-	u32 *p = (u32 *)key;
+	const u32 *p = (const u32 *)key;
 	u32 i;
 
 	/* The key can be loaded either via the configuration or by using sideband
@@ -140,7 +140,7 @@ static inline void npcm_aes_load_key(u8 *key)
 	}
 }
 
-static inline void npcm_aes_write(u32 *in)
+static inline void npcm_aes_write(const u32 *in)
 {
 	struct npcm_aes_regs *regs = aes_priv->regs;
 	u32 i;
@@ -160,7 +160,7 @@ static inline void npcm_aes_read(u32 *out)
 		out[i] = readl(&regs->aes_fifo_data);
 }
 
-static void npcm_aes_feed(u32 num_aes_blocks, u32 *datain, u32 *dataout)
+static void npcm_aes_feed(u32 num_aes_blocks, const u32 *datain, u32 *dataout)
 {
 	struct npcm_aes_regs *regs = aes_priv->regs;
 	u32 aes_datablk;
@@ -235,14 +235,14 @@ static void npcm_aes_feed(u32 num_aes_blocks, u32 *datain, u32 *dataout)
 	}
 }
 
-void aes_expand_key(u8 *key, u32 key_size, u8 *expkey)
+void aes_expand_key(const u8 *key, u32 key_size, u8 *expkey)
 {
 	/* npcm hw expands the key automatically, just copy it */
 	memcpy(expkey, key, SIZE_AES_BLOCK * 2);
 }
 
-void aes_cbc_encrypt_blocks(u32 key_size, u8 *key_exp, u8 *iv, u8 *src, u8 *dst,
-			    u32 num_aes_blocks)
+void aes_cbc_encrypt_blocks(u32 key_size, const u8 *key_exp, const u8 *iv,
+			    const u8 *src, u8 *dst, u32 num_aes_blocks)
 {
 	if (npcm_aes_init(AES_OP_ENCRYPT))
 		return;
@@ -254,8 +254,8 @@ void aes_cbc_encrypt_blocks(u32 key_size, u8 *key_exp, u8 *iv, u8 *src, u8 *dst,
 	npcm_aes_feed(num_aes_blocks, (u32 *)src, (u32 *)dst);
 }
 
-void aes_cbc_decrypt_blocks(u32 key_size, u8 *key_exp, u8 *iv, u8 *src, u8 *dst,
-			    u32 num_aes_blocks)
+void aes_cbc_decrypt_blocks(u32 key_size, const u8 *key_exp, const u8 *iv,
+			    const u8 *src, u8 *dst, u32 num_aes_blocks)
 {
 	if (npcm_aes_init(AES_OP_DECRYPT))
 		return;
