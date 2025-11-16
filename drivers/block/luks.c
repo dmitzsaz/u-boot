@@ -329,8 +329,9 @@ static int derive_key_pbkdf2(struct luks1_keyslot *slot, const u8 *pass,
  * @blk:		Block device
  * @pinfo:		Partition information
  * @hdr:		LUKS1 header (already read)
- * @pass:		Passphrase
+ * @pass:		Passphrase or pre-derived key
  * @pass_len:		Length of passphrase
+ * @pre_derived:	True if pass is a pre-derived key, false for passphrase
  * @master_key:		Buffer to receive master key
  * @key_size:		Output for key size
  *
@@ -338,7 +339,7 @@ static int derive_key_pbkdf2(struct luks1_keyslot *slot, const u8 *pass,
  */
 static int unlock_luks1(struct udevice *blk, struct disk_partition *pinfo,
 			struct luks1_phdr *hdr, const u8 *pass, size_t pass_len,
-			u8 *master_key, u32 *key_size);
+			bool pre_derived, u8 *master_key, u32 *key_size);
 
 /**
  * try_keyslot() - Try to unlock a LUKS key slot with a derived key
@@ -447,14 +448,16 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
  * unlock_luks1() - Unlock a LUKSv1 partition
  *
  * Attempts to unlock a LUKSv1 encrypted partition by trying each active
- * key slot with the provided passphrase. Uses PBKDF2 for key derivation
- * and supports CBC cipher mode with optional ESSIV.
+ * key slot with the provided passphrase or pre-derived key. When pre_derived
+ * is false, uses PBKDF2 for key derivation. When true, uses the pass data
+ * directly as the derived key. Supports CBC cipher mode with optional ESSIV.
  *
  * @blk:		Block device containing the partition
  * @pinfo:		Partition information
  * @hdr:		LUKSv1 header (already read and validated)
- * @pass:		Passphrase (binary data)
+ * @pass:		Passphrase (binary data) or pre-derived key
  * @pass_len:		Length of passphrase in bytes
+ * @pre_derived:	True if pass is a pre-derived key, false for passphrase
  * @master_key:		Buffer to receive unlocked master key (min 128 bytes)
  * @key_sizep:		Output for master key size in bytes (set only on success)
  *
@@ -462,7 +465,7 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
  */
 static int unlock_luks1(struct udevice *blk, struct disk_partition *pinfo,
 			struct luks1_phdr *hdr, const u8 *pass, size_t pass_len,
-			u8 *master_key, u32 *key_sizep)
+			bool pre_derived, u8 *master_key, u32 *key_sizep)
 {
 	uint split_key_size, km_blocks, key_size;
 	u8 *split_key, *derived_key;
@@ -524,6 +527,17 @@ static int unlock_luks1(struct udevice *blk, struct disk_partition *pinfo,
 		goto out;
 	}
 
+	/* If using pre-derived key, use it directly */
+	if (pre_derived) {
+		if (pass_len != key_size) {
+			log_debug("Pre-derived key size mismatch: got %zu, need %u\n",
+				  pass_len, key_size);
+			ret = -EINVAL;
+			goto out;
+		}
+		memcpy(derived_key, pass, key_size);
+	}
+
 	/* Try each key slot */
 	for (i = 0; i < LUKS_NUMKEYS; i++) {
 		struct luks1_keyslot *slot = &hdr->key_slot[i];
@@ -532,11 +546,13 @@ static int unlock_luks1(struct udevice *blk, struct disk_partition *pinfo,
 		if (be32_to_cpu(slot->active) != LUKS_KEY_ENABLED)
 			continue;
 
-		/* Derive key for this slot */
-		ret = derive_key_pbkdf2(slot, pass, pass_len, md_type,
-					key_size, derived_key);
-		if (ret)
-			continue;
+		/* Derive key for this slot if not pre-derived */
+		if (!pre_derived) {
+			ret = derive_key_pbkdf2(slot, pass, pass_len, md_type,
+						key_size, derived_key);
+			if (ret)
+				continue;
+		}
 
 		/* Try to unlock with the derived key */
 		ret = try_keyslot(blk, pinfo, hdr, i, md_type, key_size,
@@ -610,7 +626,7 @@ int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
 	case LUKS_VERSION_1:
 		hdr = (struct luks1_phdr *)buffer;
 		ret = unlock_luks1(blk, pinfo, hdr, pass, pass_len, master_key,
-				   key_sizep);
+				   false, key_sizep);
 		break;
 	case LUKS_VERSION_2:
 		ret = unlock_luks2(blk, pinfo, pass, pass_len, master_key,
