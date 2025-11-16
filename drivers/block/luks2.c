@@ -544,9 +544,9 @@ static int decrypt_km_xts(const u8 *derived_key, uint key_size, const u8 *km,
  * @blksz: Block size in bytes
  * Return: 0 on success, negative error code on failure
  */
-static int decrypt_km_cbc(u8 *derived_key, uint key_size, const char *encrypt,
-			  u8 *km, u8 *split_key, int size, int km_blocks,
-			  int blksz)
+static int decrypt_km_cbc(const u8 *derived_key, uint key_size,
+			  const char *encrypt, u8 *km, u8 *split_key,
+			  int size, int km_blocks, int blksz)
 {
 	u8 expkey[AES256_EXPAND_KEY_LENGTH];
 
@@ -811,7 +811,8 @@ static int verify_master_key(const struct luks2_digest *digest,
  *
  * This function attempts to unlock one keyslot by:
  * 1. Reading keyslot metadata from ofnode
- * 2. Deriving the candidate master key using the appropriate KDF
+ * 2. Deriving the candidate master key using the appropriate KDF (or using
+ *    pre-derived key directly)
  * 3. Verifying the candidate key against the stored digest
  *
  * @blk: Block device containing the LUKS partition
@@ -819,7 +820,9 @@ static int verify_master_key(const struct luks2_digest *digest,
  * @keyslot_node: ofnode for this specific keyslot
  * @digest: Digest information for verification
  * @md_type: mbedtls message digest type (for PBKDF2)
- * @pass: User-provided passphrase
+ * @pass: User-provided passphrase or pre-derived key
+ * @pass_len: Length of passphrase
+ * @pre_derived: True if pass is a pre-derived key, false for passphrase
  * @master_key: Output buffer for verified master key
  * @key_sizep: Returns the key size
  * Return: 0 if unlocked successfully, -EAGAIN to continue trying, -ve on error
@@ -828,8 +831,8 @@ static int try_unlock_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 			      ofnode keyslot_node,
 			      const struct luks2_digest *digest,
 			      mbedtls_md_type_t md_type, const u8 *pass,
-			      size_t pass_len, u8 *master_key,
-			      uint *key_sizep)
+			      size_t pass_len, bool pre_derived,
+			      u8 *master_key, uint *key_sizep)
 {
 	struct luks2_keyslot keyslot;
 	u8 cand_key[128];
@@ -845,16 +848,27 @@ static int try_unlock_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 
 	log_debug("LUKS2: trying keyslot (type=%d)\n", keyslot.kdf.type);
 
-	/* Try the keyslot using the appropriate KDF */
-	if (keyslot.kdf.type == LUKS2_KDF_PBKDF2) {
-		log_debug("LUKS2: calling try_keyslot_pbkdf2\n");
-		ret = try_keyslot_pbkdf2(blk, pinfo, &keyslot, pass, pass_len,
-					 md_type, cand_key);
+	/* If using pre-derived key, use it directly */
+	if (pre_derived) {
+		if (pass_len != keyslot.key_size) {
+			log_debug("Pre-derived key size mismatch: got %zu, need %u\n",
+				  pass_len, keyslot.key_size);
+			return -EAGAIN;
+		}
+		memcpy(cand_key, pass, pass_len);
+		ret = 0;
 	} else {
-		/* Argon2 (already checked for CONFIG_ARGON2 support) */
-		log_debug("LUKS2: calling try_keyslot_argon2\n");
-		ret = try_keyslot_argon2(blk, pinfo, &keyslot, pass, pass_len,
-					 cand_key);
+		/* Try the keyslot using the appropriate KDF */
+		if (keyslot.kdf.type == LUKS2_KDF_PBKDF2) {
+			log_debug("LUKS2: calling try_keyslot_pbkdf2\n");
+			ret = try_keyslot_pbkdf2(blk, pinfo, &keyslot, pass, pass_len,
+						 md_type, cand_key);
+		} else {
+			/* Argon2 (already checked for CONFIG_ARGON2 support) */
+			log_debug("LUKS2: calling try_keyslot_argon2\n");
+			ret = try_keyslot_argon2(blk, pinfo, &keyslot, pass, pass_len,
+						 cand_key);
+		}
 	}
 	log_debug("LUKS2: keyslot try returned %d\n", ret);
 
@@ -877,8 +891,8 @@ static int try_unlock_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 }
 
 int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
-		 const u8 *pass, size_t pass_len, u8 *master_key,
-		 uint *key_sizep)
+		 const u8 *pass, size_t pass_len, bool pre_derived,
+		 u8 *master_key, uint *key_sizep)
 {
 	ofnode keyslots_node, keyslot_node;
 	struct luks2_digest digest;
@@ -896,8 +910,8 @@ int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
 	ret = -EACCES;
 	ofnode_for_each_subnode(keyslot_node, keyslots_node) {
 		ret = try_unlock_keyslot(blk, pinfo, keyslot_node, &digest,
-					 md_type, pass, pass_len, master_key,
-					 key_sizep);
+					 md_type, pass, pass_len, pre_derived,
+					 master_key, key_sizep);
 		if (!ret)  /* Successfully unlocked! */
 			break;
 

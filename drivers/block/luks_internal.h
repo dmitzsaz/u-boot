@@ -50,14 +50,16 @@ void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey, u8 *km,
  *
  * @blk:	Block device
  * @pinfo:	Partition information
- * @pass:	Passphrase to unlock the partition
+ * @pass:	Passphrase to unlock the partition or pre-derived key
  * @pass_len:	Length of the passphrase in bytes
+ * @pre_derived: True if pass is a pre-derived key, false for passphrase
  * @master_key:	Buffer to receive the decrypted master key
  * @key_sizep:	Returns the key size
- * Return:	0 on success, -ve on error
+ * Return:	0 on success, -EACCES if no keyslots matched, other -ve on other
+ * error
  */
 int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
-		 const u8 *pass, size_t pass_len, u8 *master_key,
-		 uint *key_sizep);
+		 const u8 *pass, size_t pass_len, bool pre_derived,
+		 u8 *master_key, uint *key_sizep);
 
 #endif /* __LUKS_INTERNAL_H__ */
