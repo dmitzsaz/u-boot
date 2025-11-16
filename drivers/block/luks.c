@@ -288,6 +288,42 @@ void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey,
 }
 
 /**
+ * derive_key_pbkdf2() - Derive key from passphrase using PBKDF2
+ *
+ * @slot:		LUKS keyslot containing salt and iteration count
+ * @pass:		Passphrase
+ * @pass_len:		Length of passphrase
+ * @md_type:		Hash algorithm type
+ * @key_size:		Size of the key to derive
+ * @derived_key:	Buffer for derived key (key_size bytes)
+ * Return: 0 on success, -EPROTO on error
+ */
+static int derive_key_pbkdf2(struct luks1_keyslot *slot, const u8 *pass,
+			     size_t pass_len, mbedtls_md_type_t md_type,
+			     uint key_size, u8 *derived_key)
+{
+	uint iters = be32_to_cpu(slot->iterations);
+	int ret;
+
+	/* Derive key from passphrase using PBKDF2 */
+	log_debug("PBKDF2(pass len=%zu, ", pass_len);
+	log_debug_hex("salt[0-7]", (u8 *)slot->salt, 8);
+	log_debug("iter %u, keylen %u)\n", iters, key_size);
+	ret = mbedtls_pkcs5_pbkdf2_hmac_ext(md_type, pass, pass_len,
+					    (const u8 *)slot->salt,
+					    LUKS_SALTSIZE, iters,
+					    key_size, derived_key);
+	if (ret) {
+		log_debug("PBKDF2 failed: %d\n", ret);
+		return -EPROTO;
+	}
+
+	log_debug_hex("derived_key[0-7]", derived_key, 8);
+
+	return 0;
+}
+
+/**
  * try_keyslot() - Unlock a LUKS key slot with a passphrase
  *
  * @blk:		Block device
@@ -315,7 +351,7 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 		       uint km_blocks, u8 *split_key, u8 *candidate_key)
 {
 	struct luks1_keyslot *slot = &hdr->key_slot[slot_idx];
-	uint iters, km_offset, stripes, split_key_size;
+	uint km_offset, stripes, split_key_size;
 	struct blk_desc *desc = dev_get_uclass_plat(blk);
 	u8 expkey[AES256_EXPAND_KEY_LENGTH];
 	u8 key_digest[LUKS_DIGESTSIZE];
@@ -328,25 +364,15 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 
 	log_debug("trying key slot %d (pass len=%zu)...\n", slot_idx, pass_len);
 
-	iters = be32_to_cpu(slot->iterations);
 	km_offset = be32_to_cpu(slot->key_material_offset);
 	stripes = be32_to_cpu(slot->stripes);
 	split_key_size = key_size * stripes;
 
 	/* Derive key from passphrase using PBKDF2 */
-	log_debug("PBKDF2(pass len=%zu, ", pass_len);
-	log_debug_hex("salt[0-7]", (u8 *)slot->salt, 8);
-	log_debug("iter %u, keylen %u)\n", iters, key_size);
-	ret = mbedtls_pkcs5_pbkdf2_hmac_ext(md_type, pass, pass_len,
-					    (const u8 *)slot->salt,
-					    LUKS_SALTSIZE, iters,
-					    key_size, derived_key);
-	if (ret) {
-		log_debug("PBKDF2 failed: %d\n", ret);
-		return -EPROTO;
-	}
-
-	log_debug_hex("derived_key[0-7]", derived_key, 8);
+	ret = derive_key_pbkdf2(slot, pass, pass_len, md_type, key_size,
+				derived_key);
+	if (ret)
+		return ret;
 
 	/* Read encrypted key material */
 	ret = blk_read(blk, pinfo->start + km_offset, km_blocks, km);
