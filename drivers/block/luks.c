@@ -358,7 +358,7 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 
 	/* Decrypt key material using derived key */
 	log_debug("expand key with key_size*8 %u bits\n", key_size * 8);
-	log_debug_hex("input key (derived_key) full:", derived_key, key_size);
+	log_debug_hex("derived_key", derived_key, key_size);
 
 	aes_expand_key(derived_key, key_size * 8, expkey);
 	log_debug_hex("expanded key [0-15]:", expkey, 16);
@@ -405,7 +405,7 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 
 	/* Check if the digest matches */
 	if (!memcmp(key_digest, hdr->mk_digest, LUKS_DIGESTSIZE)) {
-		log_debug("Uunlocked with key slot %d\n", slot_idx);
+		log_debug("Unlocked with key slot %d\n", slot_idx);
 		return 0;
 	}
 	log_debug("key slot %d: wrong passphrase\n", slot_idx);
