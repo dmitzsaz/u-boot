@@ -324,6 +324,23 @@ static int derive_key_pbkdf2(struct luks1_keyslot *slot, const u8 *pass,
 }
 
 /**
+ * unlock_luks1() - Unlock a LUKSv1 partition
+ *
+ * @blk:		Block device
+ * @pinfo:		Partition information
+ * @hdr:		LUKS1 header (already read)
+ * @pass:		Passphrase
+ * @pass_len:		Length of passphrase
+ * @master_key:		Buffer to receive master key
+ * @key_size:		Output for key size
+ *
+ * Return: 0 on success, -ve on error
+ */
+static int unlock_luks1(struct udevice *blk, struct disk_partition *pinfo,
+			struct luks1_phdr *hdr, const u8 *pass, size_t pass_len,
+			u8 *master_key, u32 *key_size);
+
+/**
  * try_keyslot() - Try to unlock a LUKS key slot with a derived key
  *
  * @blk:		Block device
@@ -426,20 +443,145 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 	return -EACCES;
 }
 
-int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
-		const u8 *pass, size_t pass_len, u8 *master_key,
-		u32 *key_size)
+/**
+ * unlock_luks1() - Unlock a LUKSv1 partition
+ *
+ * Attempts to unlock a LUKSv1 encrypted partition by trying each active
+ * key slot with the provided passphrase. Uses PBKDF2 for key derivation
+ * and supports CBC cipher mode with optional ESSIV.
+ *
+ * @blk:		Block device containing the partition
+ * @pinfo:		Partition information
+ * @hdr:		LUKSv1 header (already read and validated)
+ * @pass:		Passphrase (binary data)
+ * @pass_len:		Length of passphrase in bytes
+ * @master_key:		Buffer to receive unlocked master key (min 128 bytes)
+ * @key_sizep:		Output for master key size in bytes (set only on success)
+ *
+ * Return: 0 on success, -ve on error
+ */
+static int unlock_luks1(struct udevice *blk, struct disk_partition *pinfo,
+			struct luks1_phdr *hdr, const u8 *pass, size_t pass_len,
+			u8 *master_key, u32 *key_sizep)
 {
-	uint version, split_key_size, km_blocks, hdr_blocks;
+	uint split_key_size, km_blocks, key_size;
 	u8 *split_key, *derived_key;
 	struct hash_algo *hash_algo;
 	u8 candidate_key[128], *km;
 	mbedtls_md_type_t md_type;
-	struct luks1_phdr *hdr;
 	struct blk_desc *desc;
 	int i, ret;
 
-	if (!blk || !pinfo || !pass || !master_key || !key_size)
+	desc = dev_get_uclass_plat(blk);
+
+	/* Debug: show what we read from header */
+	log_debug("Read header at sector %llu, mk_digest[0-7] ",
+		  (unsigned long long)pinfo->start);
+	log_debug_hex("", (u8 *)hdr->mk_digest, 8);
+
+	/* Verify cipher mode - only CBC supported */
+	if (strncmp(hdr->cipher_mode, "cbc", 3)) {
+		log_debug("only CBC mode is currently supported (got: %.32s)\n",
+			  hdr->cipher_mode);
+		return -ENOTSUPP;
+	}
+
+	/* Look up hash algorithm */
+	ret = hash_lookup_algo(hdr->hash_spec, &hash_algo);
+	if (ret) {
+		log_debug("unsupported hash: %.32s\n", hdr->hash_spec);
+		return -ENOTSUPP;
+	}
+
+	md_type = hash_mbedtls_type(hash_algo);
+	key_size = be32_to_cpu(hdr->key_bytes);
+
+	/* Find the first active slot to get the stripes value */
+	u32 stripes = 0;
+
+	for (i = 0; i < LUKS_NUMKEYS; i++) {
+		if (be32_to_cpu(hdr->key_slot[i].active) == LUKS_KEY_ENABLED) {
+			stripes = be32_to_cpu(hdr->key_slot[i].stripes);
+			break;
+		}
+	}
+	if (!stripes) {
+		log_debug("no active key slots found\n");
+		return -ENOENT;
+	}
+
+	split_key_size = key_size * stripes;
+	log_debug("Unlocking LUKS partition: key size: %u bytes\n", key_size);
+
+	/* Allocate buffers */
+	derived_key = malloc(key_size);
+	split_key = malloc(split_key_size);
+	km_blocks = (split_key_size + desc->blksz - 1) / desc->blksz;
+	km = malloc_cache_aligned(km_blocks * desc->blksz);
+
+	if (!derived_key || !split_key || !km) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	/* Try each key slot */
+	for (i = 0; i < LUKS_NUMKEYS; i++) {
+		struct luks1_keyslot *slot = &hdr->key_slot[i];
+
+		/* Skip inactive slots */
+		if (be32_to_cpu(slot->active) != LUKS_KEY_ENABLED)
+			continue;
+
+		/* Derive key for this slot */
+		ret = derive_key_pbkdf2(slot, pass, pass_len, md_type,
+					key_size, derived_key);
+		if (ret)
+			continue;
+
+		/* Try to unlock with the derived key */
+		ret = try_keyslot(blk, pinfo, hdr, i, md_type, key_size,
+				  derived_key, km, km_blocks, split_key,
+				  candidate_key);
+
+		if (!ret) {
+			/* Successfully unlocked */
+			memcpy(master_key, candidate_key, key_size);
+			*key_sizep = key_size;
+			goto out;
+		}
+		/* Continue trying other slots on failure */
+	}
+
+	log_debug("Failed to unlock: wrong passphrase or no active key slots\n");
+	ret = -EACCES;
+
+out:
+	if (derived_key) {
+		memset(derived_key, '\0', key_size);
+		free(derived_key);
+	}
+	if (split_key) {
+		memset(split_key, '\0', split_key_size);
+		free(split_key);
+	}
+	if (km) {
+		memset(km, '\0', km_blocks * desc->blksz);
+		free(km);
+	}
+	memset(candidate_key, '\0', sizeof(candidate_key));
+
+	return ret;
+}
+
+int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
+		const u8 *pass, size_t pass_len, u8 *master_key, u32 *key_sizep)
+{
+	uint version, hdr_blocks;
+	struct luks1_phdr *hdr;
+	struct blk_desc *desc;
+	int ret;
+
+	if (!blk || !pinfo || !pass || !master_key || !key_sizep)
 		return -EINVAL;
 
 	desc = dev_get_uclass_plat(blk);
@@ -464,115 +606,24 @@ int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
 	}
 
 	version = be16_to_cpu(*(__be16 *)(buffer + LUKS_MAGIC_LEN));
-	if (version == LUKS_VERSION_2)
-		return unlock_luks2(blk, pinfo, pass, pass_len, master_key,
-				    key_size);
-
-	if (version != LUKS_VERSION_1) {
+	switch (version) {
+	case LUKS_VERSION_1:
+		hdr = (struct luks1_phdr *)buffer;
+		ret = unlock_luks1(blk, pinfo, hdr, pass, pass_len, master_key,
+				   key_sizep);
+		break;
+	case LUKS_VERSION_2:
+		ret = unlock_luks2(blk, pinfo, pass, pass_len, master_key,
+				   key_sizep);
+		break;
+	default:
 		log_debug("unsupported LUKS version %d\n", version);
 		return -ENOTSUPP;
 	}
+	if (ret)
+		return ret;
 
-	hdr = (struct luks1_phdr *)buffer;
-
-	/* Debug: show what we read from header */
-	log_debug("Read header at sector %llu, mk_digest[0-7] ",
-		  (unsigned long long)pinfo->start);
-	log_debug_hex("", (u8 *)hdr->mk_digest, 8);
-
-	/* Verify cipher mode - only CBC supported */
-	if (strncmp(hdr->cipher_mode, "cbc", 3) != 0) {
-		log_debug("only CBC mode is currently supported (got: %.32s)\n",
-			  hdr->cipher_mode);
-		return -ENOTSUPP;
-	}
-
-	/* Look up hash algorithm */
-	ret = hash_lookup_algo(hdr->hash_spec, &hash_algo);
-	if (ret) {
-		log_debug("unsupported hash: %.32s\n", hdr->hash_spec);
-		return -ENOTSUPP;
-	}
-
-	md_type = hash_mbedtls_type(hash_algo);
-
-	*key_size = be32_to_cpu(hdr->key_bytes);
-
-	/* Find the first active slot to get the stripes value */
-	u32 stripes = 0;
-	for (i = 0; i < LUKS_NUMKEYS; i++) {
-		if (be32_to_cpu(hdr->key_slot[i].active) == LUKS_KEY_ENABLED) {
-			stripes = be32_to_cpu(hdr->key_slot[i].stripes);
-			break;
-		}
-	}
-	if (!stripes) {
-		log_debug("no active key slots found\n");
-		return -ENOENT;
-	}
-
-	split_key_size = *key_size * stripes;
-
-	log_debug("Trying to unlock LUKS partition: key size: %u bytes\n",
-		  *key_size);
-
-	/* Allocate buffers */
-	derived_key = malloc(*key_size);
-	split_key = malloc(split_key_size);
-	km_blocks = (split_key_size + desc->blksz - 1) / desc->blksz;
-	km = malloc_cache_aligned(km_blocks * desc->blksz);
-
-	if (!derived_key || !split_key || !km) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	/* Try each key slot */
-	for (i = 0; i < LUKS_NUMKEYS; i++) {
-		struct luks1_keyslot *slot = &hdr->key_slot[i];
-
-		/* Skip inactive slots */
-		if (be32_to_cpu(slot->active) != LUKS_KEY_ENABLED)
-			continue;
-
-		/* Derive key for this slot */
-		ret = derive_key_pbkdf2(slot, pass, pass_len, md_type,
-					*key_size, derived_key);
-		if (ret)
-			continue;
-
-		/* Try to unlock with the derived key */
-		ret = try_keyslot(blk, pinfo, hdr, i, md_type, *key_size,
-				  derived_key, km, km_blocks, split_key,
-				  candidate_key);
-
-		if (!ret) {
-			/* Successfully unlocked */
-			memcpy(master_key, candidate_key, *key_size);
-			goto out;
-		}
-		/* Continue trying other slots on failure */
-	}
-
-	log_debug("Failed to unlock: wrong passphrase or no active key slots\n");
-	ret = -EACCES;
-
-out:
-	if (derived_key) {
-		memset(derived_key, '\0', *key_size);
-		free(derived_key);
-	}
-	if (split_key) {
-		memset(split_key, '\0', split_key_size);
-		free(split_key);
-	}
-	if (km) {
-		memset(km, '\0', km_blocks * desc->blksz);
-		free(km);
-	}
-	memset(candidate_key, '\0', sizeof(candidate_key));
-
-	return ret;
+	return 0;
 }
 
 int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
