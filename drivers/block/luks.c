@@ -415,7 +415,8 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 }
 
 int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
-		const char *pass, u8 *master_key, u32 *key_size)
+		const u8 *pass, size_t pass_len, u8 *master_key,
+		u32 *key_size)
 {
 	uint version, split_key_size, km_blocks, hdr_blocks;
 	u8 *split_key, *derived_key;
@@ -452,8 +453,8 @@ int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
 
 	version = be16_to_cpu(*(__be16 *)(buffer + LUKS_MAGIC_LEN));
 	if (version == LUKS_VERSION_2)
-		return unlock_luks2(blk, pinfo, (const u8 *)pass, strlen(pass),
-				    master_key, key_size);
+		return unlock_luks2(blk, pinfo, pass, pass_len, master_key,
+				    key_size);
 
 	if (version != LUKS_VERSION_1) {
 		log_debug("unsupported LUKS version %d\n", version);
@@ -516,10 +517,9 @@ int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
 
 	/* Try each key slot */
 	for (i = 0; i < LUKS_NUMKEYS; i++) {
-		ret = try_keyslot(blk, pinfo, hdr, i, (const u8 *)pass,
-				  strlen(pass), md_type, *key_size,
-				  derived_key, km, km_blocks, split_key,
-				  candidate_key);
+		ret = try_keyslot(blk, pinfo, hdr, i, pass, pass_len, md_type,
+				  *key_size, derived_key, km, km_blocks,
+				  split_key, candidate_key);
 
 		if (!ret) {
 			/* Successfully unlocked */

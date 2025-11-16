@@ -274,8 +274,8 @@ static int bootstd_test_luks2_unlock(struct unit_test_state *uts)
 
 	/* Test that unlock fails for partition 1 (not LUKS) */
 	ut_assertok(part_get_info(desc, 1, &info));
-	ut_asserteq(-ENOENT, luks_unlock(desc->bdev, &info, "test", master_key,
-					 &key_size));
+	ut_asserteq(-ENOENT, luks_unlock(desc->bdev, &info, (const u8 *)"test",
+					 4, master_key, &key_size));
 
 	/* Test unlocking partition 2 with correct passphrase */
 	ut_assertok(run_command("luks unlock mmc c:2 test", 0));
