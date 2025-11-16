@@ -676,7 +676,10 @@ static int try_keyslot_argon2(struct udevice *blk, struct disk_partition *pinfo,
 				ks->kdf.salt_len, derived_key,
 				ks->area.key_size);
 	if (ret) {
-		log_err("Argon2id failed: %s\n", argon2_error_message(ret));
+		log_err("Argon2id failed: %s (code=%d)\n",
+			argon2_error_message(ret), ret);
+		if (ret == ARGON2_MEMORY_ALLOCATION_ERROR)
+			return -ENOMEM;
 		return -EPROTO;
 	}
 	log_debug("LUKS2 Argon2: key derivation succeeded\n");
