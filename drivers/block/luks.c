@@ -295,6 +295,7 @@ void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey,
  * @hdr:		LUKS header
  * @slot_idx:		Key slot index to try
  * @pass:		Passphrase to try
+ * @pass_len:		Length of passphrase
  * @md_type:		Hash algorithm type
  * @key_size:		Size of the key
  * @derived_key:	Buffer for derived key (key_size bytes)
@@ -308,9 +309,10 @@ void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey,
  */
 static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 		       struct luks1_phdr *hdr, int slot_idx,
-		       const char *pass, mbedtls_md_type_t md_type,
-		       uint key_size, u8 *derived_key, u8 *km, uint km_blocks,
-		       u8 *split_key, u8 *candidate_key)
+		       const u8 *pass, size_t pass_len,
+		       mbedtls_md_type_t md_type,
+		       uint key_size, u8 *derived_key, u8 *km,
+		       uint km_blocks, u8 *split_key, u8 *candidate_key)
 {
 	struct luks1_keyslot *slot = &hdr->key_slot[slot_idx];
 	uint iters, km_offset, stripes, split_key_size;
@@ -324,7 +326,7 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 	if (be32_to_cpu(slot->active) != LUKS_KEY_ENABLED)
 		return -ENOENT;
 
-	log_debug("trying key slot %d...\n", slot_idx);
+	log_debug("trying key slot %d (pass len=%zu)...\n", slot_idx, pass_len);
 
 	iters = be32_to_cpu(slot->iterations);
 	km_offset = be32_to_cpu(slot->key_material_offset);
@@ -332,14 +334,13 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 	split_key_size = key_size * stripes;
 
 	/* Derive key from passphrase using PBKDF2 */
-	log_debug("PBKDF2(pass '%s'[len %zu], ", pass, strlen(pass));
+	log_debug("PBKDF2(pass len=%zu, ", pass_len);
 	log_debug_hex("salt[0-7]", (u8 *)slot->salt, 8);
 	log_debug("iter %u, keylen %u)\n", iters, key_size);
-	ret = mbedtls_pkcs5_pbkdf2_hmac_ext(md_type, (const u8 *)pass,
-					    strlen(pass),
+	ret = mbedtls_pkcs5_pbkdf2_hmac_ext(md_type, pass, pass_len,
 					    (const u8 *)slot->salt,
-					    LUKS_SALTSIZE, iters, key_size,
-					    derived_key);
+					    LUKS_SALTSIZE, iters,
+					    key_size, derived_key);
 	if (ret) {
 		log_debug("PBKDF2 failed: %d\n", ret);
 		return -EPROTO;
@@ -360,7 +361,9 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 	log_debug("expand key with key_size*8 %u bits\n", key_size * 8);
 	log_debug_hex("derived_key", derived_key, key_size);
 
+	/* Decrypt key material */
 	aes_expand_key(derived_key, key_size * 8, expkey);
+
 	log_debug_hex("expanded key [0-15]:", expkey, 16);
 
 	/* Decrypt with CBC mode: first check if ESSIV is used */
@@ -369,10 +372,8 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 			      km_blocks, desc->blksz);
 	} else {
 		/* Plain CBC with zero IV */
+		log_debug("using plain CBC mode\n");
 		memset(iv, '\0', sizeof(iv));
-		log_debug("using plain CBC with zero IV\n");
-		log_debug("decrypting %u blocks\n",
-			  split_key_size / AES_BLOCK_LENGTH);
 		aes_cbc_decrypt_blocks(key_size * 8, expkey, iv, km, split_key,
 				       split_key_size / AES_BLOCK_LENGTH);
 	}
@@ -514,9 +515,10 @@ int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
 
 	/* Try each key slot */
 	for (i = 0; i < LUKS_NUMKEYS; i++) {
-		ret = try_keyslot(blk, pinfo, hdr, i, pass, md_type,
-				  *key_size, derived_key, km, km_blocks,
-				  split_key, candidate_key);
+		ret = try_keyslot(blk, pinfo, hdr, i, (const u8 *)pass,
+				  strlen(pass), md_type, *key_size,
+				  derived_key, km, km_blocks, split_key,
+				  candidate_key);
 
 		if (!ret) {
 			/* Successfully unlocked */
