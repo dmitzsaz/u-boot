@@ -324,31 +324,27 @@ static int derive_key_pbkdf2(struct luks1_keyslot *slot, const u8 *pass,
 }
 
 /**
- * try_keyslot() - Unlock a LUKS key slot with a passphrase
+ * try_keyslot() - Try to unlock a LUKS key slot with a derived key
  *
  * @blk:		Block device
  * @pinfo:		Partition information
  * @hdr:		LUKS header
  * @slot_idx:		Key slot index to try
- * @pass:		Passphrase to try
- * @pass_len:		Length of passphrase
- * @md_type:		Hash algorithm type
+ * @md_type:		Hash algorithm type for master key verification
  * @key_size:		Size of the key
- * @derived_key:	Buffer for derived key (key_size bytes)
+ * @derived_key:	Pre-derived key from PBKDF2 (key_size bytes)
  * @km:			Buffer for encrypted key material
  * @km_blocks:		Size of km buffer in blocks
  * @split_key:		Buffer for AF-split key
  * @candidate_key:	Buffer to receive decrypted master key
  *
- * Return: 0 on success (correct passphrase), -EPROTO on mbedtls error, -ve on
- * other error
+ * Return: 0 on success (correct key), -ve on error
  */
 static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 		       struct luks1_phdr *hdr, int slot_idx,
-		       const u8 *pass, size_t pass_len,
-		       mbedtls_md_type_t md_type,
-		       uint key_size, u8 *derived_key, u8 *km,
-		       uint km_blocks, u8 *split_key, u8 *candidate_key)
+		       mbedtls_md_type_t md_type, uint key_size,
+		       const u8 *derived_key, u8 *km, uint km_blocks,
+		       u8 *split_key, u8 *candidate_key)
 {
 	struct luks1_keyslot *slot = &hdr->key_slot[slot_idx];
 	uint km_offset, stripes, split_key_size;
@@ -358,21 +354,11 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 	u8 iv[AES_BLOCK_LENGTH];
 	int ret;
 
-	/* Check if slot is active */
-	if (be32_to_cpu(slot->active) != LUKS_KEY_ENABLED)
-		return -ENOENT;
-
-	log_debug("trying key slot %d (pass len=%zu)...\n", slot_idx, pass_len);
+	log_debug("trying key slot %d with derived key\n", slot_idx);
 
 	km_offset = be32_to_cpu(slot->key_material_offset);
 	stripes = be32_to_cpu(slot->stripes);
 	split_key_size = key_size * stripes;
-
-	/* Derive key from passphrase using PBKDF2 */
-	ret = derive_key_pbkdf2(slot, pass, pass_len, md_type, key_size,
-				derived_key);
-	if (ret)
-		return ret;
 
 	/* Read encrypted key material */
 	ret = blk_read(blk, pinfo->start + km_offset, km_blocks, km);
@@ -543,9 +529,22 @@ int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
 
 	/* Try each key slot */
 	for (i = 0; i < LUKS_NUMKEYS; i++) {
-		ret = try_keyslot(blk, pinfo, hdr, i, pass, pass_len, md_type,
-				  *key_size, derived_key, km, km_blocks,
-				  split_key, candidate_key);
+		struct luks1_keyslot *slot = &hdr->key_slot[i];
+
+		/* Skip inactive slots */
+		if (be32_to_cpu(slot->active) != LUKS_KEY_ENABLED)
+			continue;
+
+		/* Derive key for this slot */
+		ret = derive_key_pbkdf2(slot, pass, pass_len, md_type,
+					*key_size, derived_key);
+		if (ret)
+			continue;
+
+		/* Try to unlock with the derived key */
+		ret = try_keyslot(blk, pinfo, hdr, i, md_type, *key_size,
+				  derived_key, km, km_blocks, split_key,
+				  candidate_key);
 
 		if (!ret) {
 			/* Successfully unlocked */
