@@ -28,6 +28,24 @@ int af_merge(const u8 *src, u8 *dst, size_t key_size, uint stripes,
 	     const char *hash_spec);
 
 /**
+ * essiv_decrypt() - Decrypt key material using ESSIV mode
+ *
+ * ESSIV (Encrypted Salt-Sector Initialization Vector) mode generates a unique
+ * IV for each sector by encrypting the sector number with a key derived from
+ * hashing the encryption key. Used by both LUKS1 and LUKS2.
+ *
+ * @derived_key: Key derived from passphrase
+ * @key_size: Size of the encryption key in bytes
+ * @expkey: Expanded AES key for decryption
+ * @km: Encrypted key material buffer
+ * @split_key: Output buffer for decrypted key material
+ * @km_blocks: Number of blocks of key material
+ * @blksz: Block size in bytes
+ */
+void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey, u8 *km,
+		   u8 *split_key, uint km_blocks, uint blksz);
+
+/**
  * unlock_luks2() - Unlock a LUKS2 partition with a passphrase
  *
  * @blk:	Block device

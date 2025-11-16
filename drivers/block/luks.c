@@ -195,20 +195,6 @@ static int af_hash(struct hash_algo *algo, size_t key_size, u8 *block_buf)
 	return 0;
 }
 
-/**
- * af_merge() - Merge anti-forensic split key into original key
- *
- * This performs the LUKS AF-merge operation to recover the original key from
- * its AF-split representation. The algorithm XORs all stripes together,
- * applying diffusion between each stripe.
- *
- * @src:	AF-split key material (key_size * stripes bytes)
- * @dst:	Output buffer for merged key (key_size bytes)
- * @key_size:	Size of the original key
- * @stripes:	Number of anti-forensic stripes
- * @hash_spec:	Hash algorithm name (e.g., "sha256")
- * Return:	0 on success, -ve on error
- */
 int af_merge(const u8 *src, u8 *dst, size_t key_size, uint stripes,
 	     const char *hash_spec)
 {
@@ -250,23 +236,8 @@ int af_merge(const u8 *src, u8 *dst, size_t key_size, uint stripes,
 	return 0;
 }
 
-/**
- * essiv_decrypt() - Decrypt key material using ESSIV mode
- *
- * ESSIV (Encrypted Salt-Sector Initialization Vector) mode generates a unique
- * IV for each sector by encrypting the sector number with a key derived from
- * hashing the encryption key.
- *
- * @derived_key: Key derived from passphrase
- * @key_size: Size of the encryption key in bytes
- * @expkey: Expanded AES key for decryption
- * @km: Encrypted key material buffer
- * @split_key: Output buffer for decrypted key material
- * @km_blocks: Number of blocks of key material
- * @blksz: Block size in bytes
- */
-static void essiv_decrypt(u8 *derived_key, uint key_size, u8 *expkey, u8 *km,
-			  u8 *split_key, uint km_blocks, uint blksz)
+void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey,
+		   u8 *km, u8 *split_key, uint km_blocks, uint blksz)
 {
 	u8 essiv_expkey[AES256_EXPAND_KEY_LENGTH];
 	u8 essiv_key_material[SHA256_SUM_LEN];
@@ -576,21 +547,6 @@ out:
 	return ret;
 }
 
-/**
- * luks_create_blkmap() - Create a blkmap device for a LUKS partition
- *
- * This creates and configures a blkmap device to provide access to the
- * decrypted contents of a LUKS partition. The master key must already be
- * unlocked using luks_unlock().
- *
- * @blk:	Block device containing the LUKS partition
- * @pinfo:	Partition information
- * @master_key:	Unlocked master key
- * @key_size:	Size of the master key in bytes
- * @label:	Label for the blkmap device
- * @blkmapp:	Output pointer for created blkmap device
- * Return:	0 on success, -ve on error
- */
 int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		       const u8 *master_key, u32 key_size, const char *label,
 		       struct udevice **blkmapp)

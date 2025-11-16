@@ -455,69 +455,6 @@ out:
 }
 
 /**
- * essiv_decrypt() - Decrypt key material using ESSIV mode
- *
- * ESSIV (Encrypted Salt-Sector Initialization Vector) mode generates a unique
- * IV for each sector by encrypting the sector number with a key derived from
- * hashing the encryption key.
- *
- * @derived_key: Key derived from passphrase
- * @key_size: Size of the encryption key in bytes
- * @expkey: Expanded AES key for decryption
- * @km: Encrypted key material buffer
- * @split_key: Output buffer for decrypted key material
- * @km_blocks: Number of blocks of key material
- * @blksz: Block size in bytes
- */
-static void essiv_decrypt(u8 *derived_key, uint key_size, u8 *expkey,
-			  u8 *km, u8 *split_key, uint km_blocks, uint blksz)
-{
-	u8 essiv_expkey[AES256_EXPAND_KEY_LENGTH];
-	u8 essiv_key_material[SHA256_SUM_LEN];
-	u32 num_sectors = km_blocks;
-	u8 iv[AES_BLOCK_LENGTH];
-	uint rel_sect;
-
-	/* Generate ESSIV key by hashing the encryption key */
-	log_debug("using ESSIV mode\n");
-	sha256_csum_wd(derived_key, key_size, essiv_key_material,
-		       CHUNKSZ_SHA256);
-
-	log_debug_hex("ESSIV key[0-7]:", essiv_key_material, 8);
-
-	/* Expand ESSIV key for AES */
-	aes_expand_key(essiv_key_material, 256, essiv_expkey);
-
-	/*
-	 * Decrypt each sector with its own IV
-	 * NOTE: sector number is relative to the key material buffer,
-	 * not an absolute disk sector
-	 */
-	for (rel_sect = 0; rel_sect < num_sectors; rel_sect++) {
-		u8 sector_iv[AES_BLOCK_LENGTH];
-
-		/* Create IV: little-endian sector number padded to 16 bytes */
-		memset(sector_iv, '\0', AES_BLOCK_LENGTH);
-		put_unaligned_le32(rel_sect, sector_iv);
-
-		/* Encrypt sector number with ESSIV key to get IV */
-		aes_encrypt(256, sector_iv, essiv_expkey, iv);
-
-		/* Show the first sector for debugging */
-		if (!rel_sect) {
-			log_debug("rel_sect %x, ", rel_sect);
-			log_debug_hex("IV[0-7]:", iv, 8);
-		}
-
-		/* Decrypt this sector */
-		aes_cbc_decrypt_blocks(key_size * 8, expkey, iv,
-				       km + (rel_sect * blksz),
-				       split_key + (rel_sect * blksz),
-				       blksz / AES_BLOCK_LENGTH);
-	}
-}
-
-/**
  * decrypt_km_xts() - Decrypt key material using XTS mode
  *
  * Decrypts LUKS2 keyslot key material encrypted with AES-XTS mode.
