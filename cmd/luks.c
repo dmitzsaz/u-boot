@@ -89,7 +89,7 @@ static int do_luks_unlock(struct cmd_tbl *cmdtp, int flag, int argc,
 
 	/* Unlock the partition to get the master key */
 	ret = luks_unlock(dev_desc->bdev, &info, (const u8 *)passphrase,
-			  strlen(passphrase), master_key, &key_size);
+			  strlen(passphrase), false, master_key, &key_size);
 	if (ret) {
 		printf("Failed to unlock LUKS partition (err %dE)\n", ret);
 		return CMD_RET_FAILURE;

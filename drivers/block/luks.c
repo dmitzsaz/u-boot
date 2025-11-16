@@ -590,7 +590,8 @@ out:
 }
 
 int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
-		const u8 *pass, size_t pass_len, u8 *master_key, u32 *key_sizep)
+		const u8 *pass, size_t pass_len, bool pre_derived,
+		u8 *master_key, u32 *key_sizep)
 {
 	uint version, hdr_blocks;
 	struct luks1_phdr *hdr;
@@ -625,12 +626,12 @@ int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
 	switch (version) {
 	case LUKS_VERSION_1:
 		hdr = (struct luks1_phdr *)buffer;
-		ret = unlock_luks1(blk, pinfo, hdr, pass, pass_len, master_key,
-				   false, key_sizep);
+		ret = unlock_luks1(blk, pinfo, hdr, pass, pass_len,
+				   pre_derived, master_key, key_sizep);
 		break;
 	case LUKS_VERSION_2:
-		ret = unlock_luks2(blk, pinfo, pass, pass_len, master_key,
-				   key_sizep);
+		ret = unlock_luks2(blk, pinfo, pass, pass_len, pre_derived,
+				   master_key, key_sizep);
 		break;
 	default:
 		log_debug("unsupported LUKS version %d\n", version);

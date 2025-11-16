@@ -158,8 +158,8 @@ int luks_show_info(struct udevice *blk, struct disk_partition *pinfo);
  *		-EIO if failed to read from block device
  */
 int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
-		const u8 *pass, size_t pass_len, u8 *master_key,
-		u32 *key_size);
+		const u8 *pass, size_t pass_len, bool pre_derived,
+		u8 *master_key, u32 *key_size);
 
 /**
  * luks_create_blkmap() - Create a blkmap device for a LUKS partition
