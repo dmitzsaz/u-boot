@@ -586,8 +586,9 @@ static int decrypt_km_cbc(u8 *derived_key, uint key_size, const char *encrypt,
  * Return: 0 on success, negative error code on failure
  */
 static int try_keyslot_pbkdf2(struct udevice *blk, struct disk_partition *pinfo,
-			      const struct luks2_keyslot *ks, const char *pass,
-			      mbedtls_md_type_t md_type, u8 *cand_key)
+			      const struct luks2_keyslot *ks, const u8 *pass,
+			      size_t pass_len, mbedtls_md_type_t md_type,
+			      u8 *cand_key)
 {
 	struct blk_desc *desc = dev_get_uclass_plat(blk);
 	int ret, km_blocks, size;
@@ -597,10 +598,10 @@ static int try_keyslot_pbkdf2(struct udevice *blk, struct disk_partition *pinfo,
 	log_debug("LUKS2: trying keyslot with %u iters\n", ks->kdf.iters);
 
 	/* Derive key from passphrase */
-	ret = mbedtls_pkcs5_pbkdf2_hmac_ext(md_type, (const u8 *)pass,
-					    strlen(pass), ks->kdf.salt,
-					    ks->kdf.salt_len, ks->kdf.iters,
-					    ks->area.key_size, derived_key);
+	ret = mbedtls_pkcs5_pbkdf2_hmac_ext(md_type, pass, pass_len,
+					    ks->kdf.salt, ks->kdf.salt_len,
+					    ks->kdf.iters, ks->area.key_size,
+					    derived_key);
 	if (ret)
 		return -EPROTO;
 
@@ -655,8 +656,8 @@ out:
 
 /* Unlock using Argon2 keyslot */
 static int try_keyslot_argon2(struct udevice *blk, struct disk_partition *pinfo,
-			      const struct luks2_keyslot *ks, const char *pass,
-			      u8 *cand_key)
+			      const struct luks2_keyslot *ks, const u8 *pass,
+			      size_t pass_len, u8 *cand_key)
 {
 	struct blk_desc *desc = dev_get_uclass_plat(blk);
 	int ret, km_blocks, size;
@@ -667,11 +668,11 @@ static int try_keyslot_argon2(struct udevice *blk, struct disk_partition *pinfo,
 		  ks->kdf.time, ks->kdf.memory, ks->kdf.cpus);
 
 	/* Derive key from passphrase using Argon2id */
-	log_debug("LUKS2 Argon2: passphrase='%s', t=%u, m=%u, p=%u, saltlen=%d, keylen=%u\n",
-		  pass, ks->kdf.time, ks->kdf.memory, ks->kdf.cpus,
+	log_debug("LUKS2 Argon2: pass_len=%zu, t=%u, m=%u, p=%u, saltlen=%d, keylen=%u\n",
+		  pass_len, ks->kdf.time, ks->kdf.memory, ks->kdf.cpus,
 		  ks->kdf.salt_len, ks->area.key_size);
 	ret = argon2id_hash_raw(ks->kdf.time, ks->kdf.memory, ks->kdf.cpus,
-				pass, strlen(pass), ks->kdf.salt,
+				pass, pass_len, ks->kdf.salt,
 				ks->kdf.salt_len, derived_key,
 				ks->area.key_size);
 	if (ret) {
@@ -826,8 +827,9 @@ static int verify_master_key(const struct luks2_digest *digest,
 static int try_unlock_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 			      ofnode keyslot_node,
 			      const struct luks2_digest *digest,
-			      mbedtls_md_type_t md_type, const char *pass,
-			      u8 *master_key, uint *key_sizep)
+			      mbedtls_md_type_t md_type, const u8 *pass,
+			      size_t pass_len, u8 *master_key,
+			      uint *key_sizep)
 {
 	struct luks2_keyslot keyslot;
 	u8 cand_key[128];
@@ -846,12 +848,13 @@ static int try_unlock_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 	/* Try the keyslot using the appropriate KDF */
 	if (keyslot.kdf.type == LUKS2_KDF_PBKDF2) {
 		log_debug("LUKS2: calling try_keyslot_pbkdf2\n");
-		ret = try_keyslot_pbkdf2(blk, pinfo, &keyslot, pass, md_type,
-					 cand_key);
+		ret = try_keyslot_pbkdf2(blk, pinfo, &keyslot, pass, pass_len,
+					 md_type, cand_key);
 	} else {
 		/* Argon2 (already checked for CONFIG_ARGON2 support) */
 		log_debug("LUKS2: calling try_keyslot_argon2\n");
-		ret = try_keyslot_argon2(blk, pinfo, &keyslot, pass, cand_key);
+		ret = try_keyslot_argon2(blk, pinfo, &keyslot, pass, pass_len,
+					 cand_key);
 	}
 	log_debug("LUKS2: keyslot try returned %d\n", ret);
 
@@ -874,7 +877,8 @@ static int try_unlock_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 }
 
 int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
-		 const char *pass, u8 *master_key, uint *key_sizep)
+		 const u8 *pass, size_t pass_len, u8 *master_key,
+		 uint *key_sizep)
 {
 	ofnode keyslots_node, keyslot_node;
 	struct luks2_digest digest;
@@ -892,7 +896,8 @@ int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
 	ret = -EACCES;
 	ofnode_for_each_subnode(keyslot_node, keyslots_node) {
 		ret = try_unlock_keyslot(blk, pinfo, keyslot_node, &digest,
-					 md_type, pass, master_key, key_sizep);
+					 md_type, pass, pass_len, master_key,
+					 key_sizep);
 		if (!ret)  /* Successfully unlocked! */
 			break;
 

@@ -452,7 +452,8 @@ int luks_unlock(struct udevice *blk, struct disk_partition *pinfo,
 
 	version = be16_to_cpu(*(__be16 *)(buffer + LUKS_MAGIC_LEN));
 	if (version == LUKS_VERSION_2)
-		return unlock_luks2(blk, pinfo, pass, master_key, key_size);
+		return unlock_luks2(blk, pinfo, (const u8 *)pass, strlen(pass),
+				    master_key, key_size);
 
 	if (version != LUKS_VERSION_1) {
 		log_debug("unsupported LUKS version %d\n", version);
