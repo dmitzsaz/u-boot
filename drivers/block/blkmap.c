@@ -286,6 +286,9 @@ static ulong blkmap_blk_write_slice(struct blkmap *bm, struct blkmap_slice *bms,
 {
 	lbaint_t nr, cnt;
 
+	if (!bms->write)
+		return 0;
+
 	nr = blknr - bms->blknr;
 	cnt = (blkcnt < bms->blkcnt) ? blkcnt : bms->blkcnt;
 	return bms->write(bm, bms, nr, cnt, buffer);
