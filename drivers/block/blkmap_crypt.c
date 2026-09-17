@@ -84,13 +84,14 @@ static int process_xts_sector(struct blkmap_crypt *bmc,
 	lbaint_t j;
 	int ret;
 
-	log_debug("XTS: cur_sector=%lu bmc->blknr=%lu bmc->payload_offset=%u src_blk=%lu\n",
+	log_debug("XTS: cur_sector=" LBAFU " bmc->blknr=" LBAFU
+		  " bmc->payload_offset=%u src_blk=" LBAFU "\n",
 		  cur_sector, bmc->blknr, bmc->payload_offset, src_blk);
 
 	/* Read entire sector from disk */
 	if (blk_read(bmc->blk, src_blk, blks_per_sect, buf) !=
 	    blks_per_sect) {
-		log_err("Failed to read sector %lu\n", cur_sector);
+		log_err("Failed to read sector " LBAFU "\n", cur_sector);
 		return -EIO;
 	}
 
@@ -108,7 +109,8 @@ static int process_xts_sector(struct blkmap_crypt *bmc,
 	ret = mbedtls_aes_crypt_xts(ctx, MBEDTLS_AES_DECRYPT, bmc->sector_size,
 				    data_unit, buf, buf);
 	if (ret) {
-		log_err("XTS decrypt sector %lu failed: %d\n", cur_sector, ret);
+		log_err("XTS decrypt sector " LBAFU " failed: %d\n", cur_sector,
+			ret);
 		return ret;
 	}
 
@@ -164,7 +166,7 @@ static ulong crypt_read_xts(struct blkmap *bm, struct blkmap_crypt *bmc,
 
 	blks_per_sect = bmc->sector_size / bd->blksz;
 
-	log_debug("key_size=%u blkcnt=%lu\n", bmc->key_size, blkcnt);
+	log_debug("key_size=%u blkcnt=" LBAFU "\n", bmc->key_size, blkcnt);
 	log_debug("XTS: sector_size=%u blocks_per_sector=%u\n",
 		  bmc->sector_size, blks_per_sect);
 	log_debug("Master key (all %u bytes):\n", bmc->key_size);
@@ -175,9 +177,9 @@ static ulong crypt_read_xts(struct blkmap *bm, struct blkmap_crypt *bmc,
 	end_sector = (blknr + blkcnt - 1) / blks_per_sect;
 	offset_in_first_sector = (blknr % blks_per_sect) * bd->blksz;
 
-	log_debug("XTS: blknr=%lu blkcnt=%lu start_sector=%lu end_sector=%lu offset=%u\n",
-		  blknr, blkcnt, start_sector, end_sector,
-		  offset_in_first_sector);
+	log_debug("XTS: blknr=" LBAFU " blkcnt=" LBAFU " start_sector=" LBAFU
+		  " end_sector=" LBAFU " offset=%u\n", blknr, blkcnt,
+		  start_sector, end_sector, offset_in_first_sector);
 
 	/* Allocate buffer for one full sector */
 	buf = malloc_cache_aligned(bmc->sector_size);
@@ -213,7 +215,8 @@ static ulong crypt_read_xts(struct blkmap *bm, struct blkmap_crypt *bmc,
 	free(buf);
 	mbedtls_aes_xts_free(&ctx);
 
-	log_debug("XTS decryption completed successfully for %lu blocks\n", blkcnt);
+	log_debug("XTS decryption completed successfully for " LBAFU
+		  " blocks\n", blkcnt);
 	if (blknr == 0 && blkcnt >= 1) {
 		log_debug("First 32 bytes of decrypted data:\n");
 		log_debug_hex("", out_buf, 32);
