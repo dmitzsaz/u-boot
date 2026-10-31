@@ -175,7 +175,9 @@ static int s5p_serial_getc(struct udevice *dev)
 	struct s5p_serial_plat *plat = dev_get_plat(dev);
 	struct s5p_uart *const uart = plat->reg;
 
-	if (!(readl(&uart->ufstat) & plat->rx_fifo_count_mask))
+	/* At capacity the count can wrap to zero; FULL still means data. */
+	if (!(readl(&uart->ufstat) &
+	      (plat->rx_fifo_count_mask | plat->rx_fifo_full)))
 		return -EAGAIN;
 
 	serial_err_check(uart, 0);
@@ -209,6 +211,8 @@ static int s5p_serial_pending(struct udevice *dev, bool input)
 	uint32_t ufstat = readl(&uart->ufstat);
 
 	if (input) {
+		if (ufstat & plat->rx_fifo_full)
+			return 1;
 		return (ufstat & plat->rx_fifo_count_mask) >>
 			plat->rx_fifo_count_shift;
 	} else {
