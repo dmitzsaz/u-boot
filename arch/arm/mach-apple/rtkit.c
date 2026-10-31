@@ -299,7 +299,7 @@ int apple_rtkit_poll(struct apple_rtkit *rtk, ulong timeout)
 	}
 }
 
-int apple_rtkit_boot(struct apple_rtkit *rtk)
+static int apple_rtkit_boot_common(struct apple_rtkit *rtk, bool early_ap)
 {
 	struct apple_mbox_msg msg;
 	int endpoints[256];
@@ -425,6 +425,13 @@ wait_epmap:
 	rtk->iop_pwr = APPLE_RTKIT_PWR_STATE_SLEEP;
 	rtk->ap_pwr = APPLE_RTKIT_PWR_STATE_QUIESCED;
 
+	/* T8142 MTP waits for AP readiness before acknowledging IOP power. */
+	if (early_ap) {
+		ret = apple_rtkit_set_ap_power(rtk, APPLE_RTKIT_PWR_STATE_ON);
+		if (ret)
+			return ret;
+	}
+
 	while (rtk->iop_pwr != APPLE_RTKIT_PWR_STATE_ON) {
 		ret = apple_rtkit_poll(rtk, TIMEOUT_1SEC_US);
 		if (ret < 0)
@@ -432,6 +439,16 @@ wait_epmap:
 	}
 
 	return 0;
+}
+
+int apple_rtkit_boot(struct apple_rtkit *rtk)
+{
+	return apple_rtkit_boot_common(rtk, false);
+}
+
+int apple_rtkit_boot_early_ap(struct apple_rtkit *rtk)
+{
+	return apple_rtkit_boot_common(rtk, true);
 }
 
 int apple_rtkit_set_ap_power(struct apple_rtkit *rtk, int pwrstate)

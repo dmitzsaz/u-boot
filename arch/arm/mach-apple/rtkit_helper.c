@@ -32,6 +32,8 @@
 #define RTKIT_HELPER_MAX_BUFS	8
 
 struct rtkit_helper_buf {
+	u32 endpoint;
+	bool is_mapped;
 	u64 dva;
 	size_t size;
 };
@@ -57,10 +59,17 @@ struct rtkit_helper_priv {
 	bool handoff_published;
 };
 
+static bool rtkit_helper_is_j704(struct udevice *dev)
+{
+	return of_machine_is_compatible("apple,j704") &&
+	       device_is_compatible(dev, "apple,t8142-rtk-helper-asc4");
+}
+
 static bool rtkit_helper_uses_dram(struct udevice *dev)
 {
 	return IS_ENABLED(CONFIG_APPLE_MTP_KEYB) &&
-	       device_is_compatible(dev, "apple,t8140-rtk-helper-asc4");
+	       (device_is_compatible(dev, "apple,t8140-rtk-helper-asc4") ||
+		rtkit_helper_is_j704(dev));
 }
 
 static void rtkit_helper_read_dma_window(struct udevice *dev)
@@ -76,6 +85,20 @@ static void rtkit_helper_read_dma_window(struct udevice *dev)
 	    !range[1])
 		return;
 
+	if (rtkit_helper_is_j704(dev)) {
+		ofnode memory = ofnode_path("/memory");
+
+		/* Buffers are physical addresses while the helper DART bypasses.
+		 * Use only the live RAM bank Aura provided; LMB excludes every
+		 * existing reservation, payload and U-Boot allocation.
+		 */
+		if (!ofnode_valid(memory) ||
+		    ofnode_read_u64_array(memory, "reg", range, 2) ||
+		    range[0] < 0x10000000000ULL || !range[1] ||
+		    range[0] > 0x10800000000ULL ||
+		    range[1] > 0x10800000000ULL - range[0])
+			return;
+	}
 	priv->dma_start = range[0];
 	priv->dma_end = range[0] + range[1];
 
@@ -143,6 +166,8 @@ static int shmem_setup(void *cookie, struct apple_rtkit_buffer *buf) {
 
 		/* An untracked buffer rules out a live handoff. */
 		if (priv->nbufs < RTKIT_HELPER_MAX_BUFS) {
+			priv->bufs[priv->nbufs].endpoint = buf->endpoint;
+			priv->bufs[priv->nbufs].is_mapped = false;
 			priv->bufs[priv->nbufs].dva = buf->dva;
 			priv->bufs[priv->nbufs].size = ALIGN(buf->size, SZ_16K);
 		}
@@ -157,6 +182,15 @@ static int shmem_setup(void *cookie, struct apple_rtkit_buffer *buf) {
 		dev_err(dev, "RTKit mapped buffer outside SRAM: %#llx+%#zx\n",
 			buf->dva, buf->size);
 		return -EFAULT;
+	}
+	if (rtkit_helper_is_j704(dev)) {
+		if (priv->nbufs >= RTKIT_HELPER_MAX_BUFS)
+			return -E2BIG;
+		priv->bufs[priv->nbufs].endpoint = buf->endpoint;
+		priv->bufs[priv->nbufs].is_mapped = true;
+		priv->bufs[priv->nbufs].dva = buf->dva;
+		priv->bufs[priv->nbufs].size = buf->size;
+		priv->nbufs++;
 	}
 	return 0;
 }
@@ -208,6 +242,8 @@ static int rtkit_helper_probe(struct udevice *dev)
 
 	if (rtkit_helper_uses_dram(dev))
 		rtkit_helper_read_dma_window(dev);
+	if (rtkit_helper_is_j704(dev) && (!priv->dart || !priv->dma_end))
+		return -EINVAL;
 
 	ctrl = readl(priv->asc + REG_CPU_CTRL);
 	writel(ctrl | REG_CPU_CTRL_RUN, priv->asc + REG_CPU_CTRL);
@@ -216,7 +252,8 @@ static int rtkit_helper_probe(struct udevice *dev)
 	if (!priv->rtk)
 		return -ENOMEM;
 
-	ret = apple_rtkit_boot(priv->rtk);
+	ret = rtkit_helper_is_j704(dev) ? apple_rtkit_boot_early_ap(priv->rtk) :
+		apple_rtkit_boot(priv->rtk);
 	if (ret < 0) {
 		printf("%s: Helper apple_rtkit_boot returned: %d\n", __func__, ret);
 		goto err_stop;
@@ -327,12 +364,18 @@ static int rtkit_helper_fdt_publish(struct udevice *dev, void *blob)
 			return -ENOSPC;
 	}
 
+	if (rtkit_helper_is_j704(dev)) {
+		fdt_delprop(blob, node, "memory-region");
+		fdt_delprop(blob, node, "apple,rtkit-buffers");
+	}
 	for (i = 0; i < priv->nbufs; i++) {
 		struct rtkit_helper_buf *b = &priv->bufs[i];
 
 		snprintf(name, sizeof(name), "mtp-rtkit@%llx", b->dva);
 		resv = fdt_path_offset(blob, "/reserved-memory");
 		sub = fdt_add_subnode(blob, resv, name);
+		if (sub == -FDT_ERR_EXISTS && rtkit_helper_is_j704(dev))
+			sub = fdt_subnode_offset(blob, resv, name);
 		if (sub < 0)
 			return -ENOSPC;
 
@@ -353,12 +396,34 @@ static int rtkit_helper_fdt_publish(struct udevice *dev, void *blob)
 		if (node < 0 ||
 		    fdt_appendprop_u32(blob, node, "memory-region", rphandle))
 			return -ENOSPC;
+		if (rtkit_helper_is_j704(dev)) {
+			u32 inventory[] = { cpu_to_fdt32(b->endpoint),
+				cpu_to_fdt32(b->dva >> 32), cpu_to_fdt32(b->dva),
+				cpu_to_fdt32(b->size), cpu_to_fdt32(b->is_mapped) };
+
+			if (fdt_appendprop(blob, node, "apple,rtkit-buffers",
+					   inventory, sizeof(inventory)))
+				return -ENOSPC;
+		}
 	}
 
 	node = rtkit_helper_fdt_node(blob, priv->dart);
-	if (node < 0 ||
-	    fdt_appendprop_u32(blob, node, "apple,bypass-handoff-streams",
-			       priv->dart_sid))
+	if (node < 0)
+		return node;
+	if (rtkit_helper_is_j704(dev)) {
+		/* The adopted stream uses physical addresses for its buffers.
+		 * Make Linux's allocator use the same, validated high DMA window.
+		 */
+		reg[0] = cpu_to_fdt64(priv->dma_start);
+		reg[1] = cpu_to_fdt64(priv->dma_end - priv->dma_start);
+		ret = fdt_setprop(blob, node, "apple,dma-range", reg, sizeof(reg));
+		ret = ret ?: fdt_setprop_u32(blob, node, "apple,bypass-handoff-streams",
+					 priv->dart_sid);
+	} else {
+		ret = fdt_appendprop_u32(blob, node, "apple,bypass-handoff-streams",
+					priv->dart_sid);
+	}
+	if (ret)
 		return -ENOSPC;
 
 	node = rtkit_helper_fdt_node(blob, dev);
@@ -393,6 +458,10 @@ int apple_rtkit_helper_fdt_fixup(void *blob)
 		if (ret) {
 			priv->handoff_published = false;
 			apple_dart_release_bypass(priv->dart);
+			if (rtkit_helper_is_j704(dev)) {
+				dev_err(dev, "Refusing J704 boot without a live MTP handoff (%d)\n", ret);
+				return ret;
+			}
 			dev_warn(dev, "no live OS handoff (%d); stopping RTKit at boot\n",
 				 ret);
 		}
