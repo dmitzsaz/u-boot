@@ -237,6 +237,14 @@ static int apple_dart_probe(struct udevice *dev)
 	    device_is_compatible(dev, "apple,t8110-dart"))
 		priv->shift = 4;
 
+	/* T8142 has a 42-bit input space. The legacy two-level table path
+	 * does not describe it; admit only the hardware bypass path tested
+	 * on this board, before changing any stream state.
+	 */
+	if (device_is_compatible(dev, "apple,t8142-dart") &&
+	    !(readl(priv->base + DART_PARAMS2) & DART_PARAMS2_BYPASS_SUPPORT))
+		return -EOPNOTSUPP;
+
 	priv->dvabase = DART_PAGE_SIZE;
 	priv->dvaend = SZ_4G - DART_PAGE_SIZE;
 

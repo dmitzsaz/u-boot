@@ -11,6 +11,7 @@
 #include <lmb.h>
 #include <nvme.h>
 #include <part.h>
+#include <usb.h>
 #include <linux/ioport.h>
 #include <linux/stringify.h>
 
@@ -1235,6 +1236,25 @@ static void t8140_late_init(void)
 	t8140_loader_initrd(chosen);
 }
 
+static int apple_alloc_kernel(phys_addr_t *addr)
+{
+	u64 base = gd->bd->bi_dram[0].start;
+	u64 size = gd->bd->bi_dram[0].size;
+
+	if (!of_machine_is_compatible("apple,j704"))
+		return lmb_alloc(SZ_128M, addr);
+
+	/* Linux 7.3 on J704 reports BAD_PAGE with the generic high load slot.
+	 * The measured low slot boots cleanly. Admit it only inside live RAM
+	 * and when LMB says the complete, 2-MiB-aligned span is unoccupied.
+	 */
+	*addr = ALIGN_DOWN(base, SZ_1G) + SZ_256M + SZ_32M;
+	if (*addr < base || size < SZ_128M || *addr - base > size - SZ_128M ||
+	    lmb_get_free_size(*addr) < SZ_128M)
+		return -ENOMEM;
+	return lmb_alloc_mem(LMB_MEM_ALLOC_ADDR, SZ_2M, addr, SZ_128M, LMB_NONE);
+}
+
 int board_late_init(void)
 {
 	u32 status = 0;
@@ -1252,7 +1272,7 @@ int board_late_init(void)
 	status |= !lmb_alloc(SZ_1G, &addr) ? env_set_hex("loadaddr", addr) : 1;
 	status |= !lmb_alloc(SZ_2M, &addr) ?
 		env_set_hex("fdt_addr_r", addr) : 1;
-	status |= !lmb_alloc(SZ_128M, &addr) ?
+	status |= !apple_alloc_kernel(&addr) ?
 		env_set_hex("kernel_addr_r", addr) : 1;
 	status |= !lmb_alloc(SZ_1G, &addr) ?
 		env_set_hex("ramdisk_addr_r", addr) : 1;
@@ -1271,6 +1291,17 @@ int board_late_init(void)
 	return 0;
 }
 
+void board_quiesce_devices(void)
+{
+	/* The PHY's OS-prepare callback alone does not halt xHCI DMA. */
+	if (IS_ENABLED(CONFIG_USB) && of_machine_is_compatible("apple,j704")) {
+		int ret = usb_stop();
+
+		if (ret)
+			log_err("J704: USB shutdown failed (%d)\n", ret);
+	}
+}
+
 int ft_board_setup(void *blob, struct bd_info *bd)
 {
 	struct udevice *dev;
@@ -1278,8 +1309,11 @@ int ft_board_setup(void *blob, struct bd_info *bd)
 	int node, ret;
 
 	/* Coprocessors handed over running must be described in every case. */
-	if (IS_ENABLED(CONFIG_APPLE_MTP_KEYB))
-		apple_rtkit_helper_fdt_fixup(blob);
+	if (IS_ENABLED(CONFIG_APPLE_MTP_KEYB)) {
+		ret = apple_rtkit_helper_fdt_fixup(blob);
+		if (ret && of_machine_is_compatible("apple,j704"))
+			return ret;
+	}
 
 	/*
 	 * Modify the "stdout-path" property under "/chosen" to point
