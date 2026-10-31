@@ -99,7 +99,8 @@
 #define  USB2PHY_MISCTUNE_REFCLK_GATE_OFF BIT(30)
 
 struct apple_atcphy_priv {
-	bool usb2_only;		/* A18 Pro: USB2 through a fixed hub */
+	bool usb2_only;		/* Bounded bootloader USB2 host mode */
+	bool t8142;		/* T8142 has different PIPE mux fields */
 	void __iomem *core;
 	void __iomem *pipehandler;
 	void __iomem *usb2phy;
@@ -212,10 +213,14 @@ static int atcphy_usb2_power_on(struct udevice *dev)
 	clear32(priv->usb2phy + USB2PHY_MISCTUNE, USB2PHY_MISCTUNE_APBCLK_GATE_OFF);
 	clear32(priv->usb2phy + USB2PHY_MISCTUNE, USB2PHY_MISCTUNE_REFCLK_GATE_OFF);
 
-	/* Let the eUSB2 repeater settle between reset release and link start. */
-	mdelay(5);
+	/* Only T8140 has the separate eUSB2 repeater register bank. */
+	if (!priv->t8142)
+		mdelay(5);
 
 	writel(USB2PHY_USBCTL_RUN, priv->usb2phy + USB2PHY_USBCTL);
+
+	if (priv->t8142)
+		return 0;
 
 	/* Per-device eUSB2 defaults; the resets above cleared them. */
 	ret = atcphy_apply_tunable(dev, priv->usb2phy_reg,
@@ -258,6 +263,25 @@ static int atcphy_power_off(struct udevice *dev)
 	return 0;
 }
 
+static u32 atcphy_pipe_clk_mask(struct apple_atcphy_priv *priv)
+{
+	return priv->t8142 ? GENMASK(6, 4) : PIPEHANDLER_MUX_CTRL_CLK;
+}
+
+static void atcphy_pipe_clk(struct apple_atcphy_priv *priv, u32 value)
+{
+	mask32(priv->pipehandler + PIPEHANDLER_MUX_CTRL,
+	       atcphy_pipe_clk_mask(priv), value << (priv->t8142 ? 4 : 3));
+}
+
+static void atcphy_pipe_data(struct apple_atcphy_priv *priv, u32 value)
+{
+	mask32(priv->pipehandler + PIPEHANDLER_MUX_CTRL,
+	       priv->t8142 ? GENMASK(1, 0) : PIPEHANDLER_MUX_CTRL_DATA, value);
+}
+
+static void atcphy_setup_pipehandler_dummy(struct apple_atcphy_priv *priv);
+
 static int atcphy_stop(struct udevice *dev)
 {
 	struct apple_atcphy_priv *priv = dev_get_priv(dev);
@@ -266,11 +290,17 @@ static int atcphy_stop(struct udevice *dev)
 	priv->configured = false;
 	atcphy_dwc3_reset_assert(priv);
 	atcphy_usb2_power_off(priv);
-	mask32(priv->pipehandler + PIPEHANDLER_MUX_CTRL,
-	       PIPEHANDLER_MUX_CTRL_CLK,
-	       FIELD_PREP(PIPEHANDLER_MUX_CTRL_CLK, PIPEHANDLER_MUX_CTRL_CLK_OFF));
-	clear32(priv->pipehandler + PIPEHANDLER_NONSELECTED_OVERRIDE,
-		PIPEHANDLER_DUMMY_PHY_EN);
+	if (priv->t8142) {
+		/* The next OS needs the dummy clock for its PIPE lock handshake.
+		 * DWC3 is held in reset, so park the backend without waiting on
+		 * that stopped controller. Keep the AON dummy source enabled.
+		 */
+		atcphy_setup_pipehandler_dummy(priv);
+	} else {
+		atcphy_pipe_clk(priv, PIPEHANDLER_MUX_CTRL_CLK_OFF);
+		clear32(priv->pipehandler + PIPEHANDLER_NONSELECTED_OVERRIDE,
+			PIPEHANDLER_DUMMY_PHY_EN);
+	}
 
 	return atcphy_power_off(dev);
 }
@@ -287,21 +317,19 @@ static int atcphy_startup_failed(struct udevice *dev, int ret)
 
 static void atcphy_setup_pipehandler_dummy(struct apple_atcphy_priv *priv)
 {
-	void __iomem *mux = priv->pipehandler + PIPEHANDLER_MUX_CTRL;
-
-	mask32(mux, PIPEHANDLER_MUX_CTRL_CLK,
-	       FIELD_PREP(PIPEHANDLER_MUX_CTRL_CLK, PIPEHANDLER_MUX_CTRL_CLK_OFF));
+	/* DWC3 is held in reset: park PIPE before enabling its dummy backend. */
+	if (priv->t8142) {
+		clear32(priv->pipehandler + PIPEHANDLER_OVERRIDE_VALUES,
+			PIPEHANDLER_OVERRIDE_VAL_RXDETECT0 | PIPEHANDLER_OVERRIDE_VAL_RXDETECT1);
+		set32(priv->pipehandler + PIPEHANDLER_OVERRIDE,
+		      PIPEHANDLER_OVERRIDE_RXVALID | PIPEHANDLER_OVERRIDE_RXDETECT);
+	}
+	atcphy_pipe_clk(priv, PIPEHANDLER_MUX_CTRL_CLK_OFF);
 	udelay(10);
-	mask32(mux, PIPEHANDLER_MUX_CTRL_DATA,
-	       FIELD_PREP(PIPEHANDLER_MUX_CTRL_DATA,
-			  PIPEHANDLER_MUX_CTRL_DATA_DUMMY));
+	atcphy_pipe_data(priv, PIPEHANDLER_MUX_CTRL_DATA_DUMMY);
 	udelay(10);
-	mask32(mux, PIPEHANDLER_MUX_CTRL_CLK,
-	       FIELD_PREP(PIPEHANDLER_MUX_CTRL_CLK,
-			  PIPEHANDLER_MUX_CTRL_CLK_DUMMY));
+	atcphy_pipe_clk(priv, PIPEHANDLER_MUX_CTRL_CLK_DUMMY);
 	udelay(10);
-
-	/* The dwc3 core does not finish initialising without the dummy PHY. */
 	set32(priv->pipehandler + PIPEHANDLER_NONSELECTED_OVERRIDE,
 	      PIPEHANDLER_DUMMY_PHY_EN);
 }
@@ -515,13 +543,54 @@ static int apple_atcphy_t8140_probe(struct udevice *dev)
 	return 0;
 }
 
+/*
+ * Initial J704 USB2 host path. Registers and sequencing follow the T8142
+ * Linux driver. Firmware/HPM retains Type-C power policy; no SuperSpeed or
+ * alternate-mode ownership is claimed here. Never take over the UART port.
+ */
+static int apple_atcphy_t8142_probe(struct udevice *dev)
+{
+	struct apple_atcphy_priv *priv = dev_get_priv(dev);
+	fdt_addr_t core, pipe, usb2;
+	fdt_size_t core_size, pipe_size, usb2_size;
+	int ret;
+
+	if (!of_machine_is_compatible("apple,j704"))
+		return -ENODEV;
+	core = dev_read_addr_size_name(dev, "core", &core_size);
+	pipe = dev_read_addr_size_name(dev, "pipehandler", &pipe_size);
+	usb2 = dev_read_addr_size_name(dev, "usb2phy", &usb2_size);
+	if ((core != 0x40b000000ULL && core != 0x41b000000ULL) ||
+	    pipe != core - 0x57c000 || usb2 != core - 0x570000 ||
+	    core_size != 0x4c000 || pipe_size != 0x4000 || usb2_size != 0x4000)
+		return -EINVAL;
+	priv->core = (void __iomem *)(uintptr_t)core;
+	priv->pipehandler = (void __iomem *)(uintptr_t)pipe;
+	priv->usb2phy = (void __iomem *)(uintptr_t)usb2;
+	priv->t8142 = true;
+	priv->usb2_only = true;
+	priv->powered = true;
+	ret = atcphy_stop(dev);
+	if (ret)
+		return ret;
+	set32(priv->usb2phy + USB2PHY_SIG, USB2PHY_SIG_HOST);
+	ret = atcphy_configure_usb2(dev);
+	if (!ret)
+		dev_info(dev, "J704 T8142 USB2 host PHY ready\n");
+	return ret;
+}
+
 static int apple_atcphy_reset_probe(struct udevice *dev)
 {
 	struct apple_atcphy_priv *priv = dev_get_priv(dev);
 	struct udevice *child;
 	int ret;
 
-	if (device_is_compatible(dev, "apple,t8140-atcphy")) {
+	if (device_is_compatible(dev, "apple,t8142-atcphy")) {
+		ret = apple_atcphy_t8142_probe(dev);
+		if (ret)
+			return ret;
+	} else if (device_is_compatible(dev, "apple,t8140-atcphy")) {
 		ret = apple_atcphy_t8140_probe(dev);
 		if (ret)
 			return ret;
@@ -554,6 +623,7 @@ static const struct udevice_id apple_atcphy_ids[] = {
 	{ .compatible = "apple,t8103-atcphy" },
 	{ .compatible = "apple,t8122-atcphy" },
 	{ .compatible = "apple,t8140-atcphy" },
+	{ .compatible = "apple,t8142-atcphy" },
 	{ }
 };
 
