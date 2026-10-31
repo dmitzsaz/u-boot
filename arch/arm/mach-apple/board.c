@@ -19,6 +19,7 @@
 #include <asm/global_data.h>
 #include <asm/io.h>
 #include <asm/system.h>
+#include <asm/arch/j704_sd.h>
 #include <asm/arch/rtkit.h>
 
 DECLARE_GLOBAL_DATA_PTR;
@@ -875,6 +876,20 @@ static struct mm_region t8142_mem_map[] = {
 		.attrs = PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) |
 			 PTE_BLOCK_NON_SHARE | PTE_BLOCK_PXN | PTE_BLOCK_UXN
 	}, {
+		/* PCIE memory window (J704 SD card reader) */
+		.virt = 0xb80000000,
+		.phys = 0xb80000000,
+		.size = SZ_1G,
+		.attrs = PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRE) |
+			 PTE_BLOCK_NON_SHARE | PTE_BLOCK_PXN | PTE_BLOCK_UXN
+	}, {
+		/* PCIE ECAM, buses 0..2 */
+		.virt = 0x1cb0000000,
+		.phys = 0x1cb0000000,
+		.size = 0x300000,
+		.attrs = PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) |
+			 PTE_BLOCK_NON_SHARE | PTE_BLOCK_PXN | PTE_BLOCK_UXN
+	}, {
 		.virt = 0x10000000000,
 		.phys = 0x10000000000,
 		.size = 16UL * SZ_1G,
@@ -1265,6 +1280,8 @@ int board_late_init(void)
 
 	if (of_machine_is_compatible("apple,t8140"))
 		t8140_late_init();
+	if (of_machine_is_compatible("apple,j704"))
+		j704_sd_late_init();
 
 	/* somewhat based on the Linux Kernel boot requirements:
 	 * align by 2M and maximal FDT size 2M
@@ -1293,6 +1310,9 @@ int board_late_init(void)
 
 void board_quiesce_devices(void)
 {
+	if (of_machine_is_compatible("apple,j704"))
+		j704_sd_quiesce();
+
 	/* The PHY's OS-prepare callback alone does not halt xHCI DMA. */
 	if (IS_ENABLED(CONFIG_USB) && of_machine_is_compatible("apple,j704")) {
 		int ret = usb_stop();

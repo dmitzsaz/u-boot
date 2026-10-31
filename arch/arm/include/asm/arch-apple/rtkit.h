@@ -34,6 +34,9 @@ int apple_rtkit_boot(struct apple_rtkit *rtk);
 int apple_rtkit_boot_early_ap(struct apple_rtkit *rtk);
 int apple_rtkit_set_ap_power(struct apple_rtkit *rtk, int pwrstate);
 int apple_rtkit_poll(struct apple_rtkit *rtk, ulong timeout);
+int apple_rtkit_recv_app(struct apple_rtkit *rtk, int endpoint, u64 *msg0,
+			 ulong timeout);
+int apple_rtkit_send_app(struct apple_rtkit *rtk, int endpoint, u64 msg0);
 int apple_rtkit_shutdown(struct apple_rtkit *rtk, int pwrstate);
 
 int apple_rtkit_helper_poll(struct udevice *dev, ulong timeout);

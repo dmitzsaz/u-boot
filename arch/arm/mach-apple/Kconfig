@@ -28,4 +28,14 @@ config SYS_MALLOC_F_LEN
 config LNX_KRNL_IMG_TEXT_OFFSET_BASE
 	default TEXT_BASE
 
+config J704_SD
+	bool "J704 built-in SD card reader"
+	depends on DM_MMC && MMC_SDHCI && CMDLINE
+	select MMC_SDHCI_IO_ACCESSORS
+	help
+	  Bring up APCIe port 2 and its Genesys GL9755 SD host on the J704
+	  (MacBook Pro M5), with ADMA2 through port 2's owned DART stream. Adds
+	  the j704sd command and the j704_sdboot environment, which boots the
+	  card's /boot/extlinux/extlinux.conf.
+
 endif

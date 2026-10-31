@@ -1,0 +1,147 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/* Static resources shared by the reference board and the handoff overlay.
+ * No MAC addresses, tuning tables or calibration blobs belong in this file.
+ * Aura fills the aliases and platform-data children from this boot's ADT.
+ */
+&{/} {
+    j704-platform {
+        compatible = "apple,j704-platform";
+        apple,smc = <&smc>;
+    };
+    aliases {
+        wifi0 = "/soc/pcie@1cb0000000/pci@0,0/wifi@0,0";
+        bluetooth0 = "/soc/pcie@1cb0000000/pci@0,0/bluetooth@0,1";
+    };
+    j704-platform-data {
+        compatible = "apple,j704-platform-data";
+        shared { };
+        port0 { };
+        port2 { };
+    };
+    j704_pwm_clock: j704-pwm-clock {
+        compatible = "fixed-clock";
+        #clock-cells = <0>;
+        clock-frequency = <24000000>;
+    };
+    j704-kbd-leds {
+        compatible = "pwm-leds";
+        led-0 {
+            pwms = <&j704_pwm 0 40000>;
+            label = "kbd_backlight";
+            function = "kbd_backlight";
+            color = <0>;
+            max-brightness = <255>;
+            default-state = "keep";
+        };
+    };
+};
+&{/soc/power-management@380700000} {
+    #address-cells = <1>;
+    #size-cells = <1>;
+    j704_fpwm_power: power-controller@330 {
+        compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+        reg = <0x330 4>;
+        #power-domain-cells = <0>;
+        #reset-cells = <0>;
+        label = "fpwm0";
+    };
+};
+&{/soc} {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    j704_pwm: pwm@3a5040000 {
+        compatible = "apple,t8142-fpwm", "apple,s5l-fpwm";
+        reg = <3 0xa5040000 0 0x4000>;
+        power-domains = <&j704_fpwm_power>;
+        clocks = <&j704_pwm_clock>;
+        #pwm-cells = <2>;
+    };
+    j704_radio_dart: iommu@488000000 {
+        compatible = "apple,t8142-dart", "apple,t8110-dart";
+        status = "disabled";
+        reg = <4 0x88000000 0 0x20000>;
+        interrupt-parent = <&aic>;
+        interrupts = <0 1463 4>;
+        #iommu-cells = <1>;
+        apple,dma-range = <0x100 0x00100000 0 0x3fe00000>;
+    };
+   j704_dart2: iommu@48a000000 {
+    status = "disabled";
+    compatible = "apple,t8142-dart", "apple,t8110-dart";
+    reg = <0x4 0x8a000000 0x0 0x20000>;
+    interrupt-parent = <&aic>;
+    interrupts = <0 1481 4>;
+    #iommu-cells = <1>;
+   };
+   j704_pcie: pcie@1cb0000000 {
+    status = "disabled";
+    compatible = "apple,t8142-pcie";
+    device_type = "pci";
+    apple,j704-preinitialized-port0;
+    apple,j704-preinitialized-port2;
+    linux,pci-domain = <0>;
+    reg = <0x1c 0xb0000000 0 0x300000>,
+          <4 0x8c000000 0 0x4000>,
+          <4 0x88028000 0 0x8000>,
+          <4 0x8f010000 0 0x4000>,
+          <4 0x8a028000 0 0x8000>,
+          <4 0x8f018000 0 0x4000>;
+    reg-names = "config", "rc", "port0", "phy0", "port2", "phy2";
+    interrupt-parent = <&aic>;
+    interrupts = <0 1462 4>, <0 1471 4>, <0 1480 4>;
+    msi-controller;
+    msi-parent = <&j704_pcie>;
+    msi-ranges = <&aic 0 1741 1 32>;
+    iommu-map = <0x100 &j704_radio_dart 1 1>, <0x101 &j704_radio_dart 2 1>, <0x200 &j704_dart2 1 1>;
+    iommu-map-mask = <0xffff>;
+    bus-range = <0 2>;
+    #address-cells = <3>; #size-cells = <2>;
+    ranges = <0x43000000 0xb 0xc0000000 0xb 0xc0000000 0 0x20000000>,
+             <0x02000000 0 0x80000000 0xb 0x80000000 0 0x40000000>;
+    port2: pci@2,0 {
+     device_type = "pci";
+     reg = <0x1000 0 0 0 0>;
+     bus-range = <2 2>;
+     #address-cells = <3>; #size-cells = <2>;
+     ranges;
+     interrupt-controller; #interrupt-cells = <1>;
+     interrupt-map-mask = <0 0 0 7>;
+     interrupt-map = <0 0 0 1 &port2 0 0 0 0>,
+                     <0 0 0 2 &port2 0 0 0 1>,
+                     <0 0 0 3 &port2 0 0 0 2>,
+                     <0 0 0 4 &port2 0 0 0 3>;
+     sdreader@0,0 {
+      reg = <0x20000 0 0 0 0>;
+      /* Apple wires this connector with CD and WP polarity 1, which the GL9755
+       * driver applies as the endpoint's own PECONF inversions (config+0x44
+       * bits 30/31), exactly as the native ConfigureConnectorPolarities does. */
+      cd-inverted;
+      wp-inverted;
+      /* Poll card presence on this connector. */
+      broken-cd;
+     };
+    };
+    port0: pci@0,0 {
+     device_type = "pci";
+     reg = <0 0 0 0 0>;
+     bus-range = <1 1>;
+     #address-cells = <3>; #size-cells = <2>;
+     ranges;
+     interrupt-controller; #interrupt-cells = <1>;
+     interrupt-map-mask = <0 0 0 7>;
+     interrupt-map = <0 0 0 1 &port0 0 0 0 0>,
+                     <0 0 0 2 &port0 0 0 0 1>,
+                     <0 0 0 3 &port0 0 0 0 2>,
+                     <0 0 0 4 &port0 0 0 0 3>;
+     j704_wifi: wifi@0,0 {
+      reg = <0x10000 0 0 0 0>;
+      compatible = "brcm,bcm4329-fmac";
+      brcm,board-type = "apple,linosa";
+     };
+     j704_bluetooth: bluetooth@0,1 {
+      reg = <0x10100 0 0 0 0>;
+      brcm,board-type = "apple,linosa";
+     };
+    };
+   };
+};

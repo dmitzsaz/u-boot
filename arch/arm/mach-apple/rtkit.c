@@ -6,6 +6,7 @@
 
 #include <mailbox.h>
 #include <malloc.h>
+#include <time.h>
 
 #include <asm/arch/rtkit.h>
 #include <linux/apple-mailbox.h>
@@ -213,16 +214,13 @@ reply:
 	return 0;
 }
 
-int apple_rtkit_poll(struct apple_rtkit *rtk, ulong timeout)
+/* Service one message for the management or a system endpoint. */
+static int apple_rtkit_handle(struct apple_rtkit *rtk, const struct apple_mbox_msg *rx)
 {
-	struct apple_mbox_msg msg;
+	struct apple_mbox_msg msg = *rx;
 	int ret;
 	int endpoint;
 	int msgtype;
-
-	ret = mbox_recv(rtk->chan, &msg, timeout);
-	if (ret < 0)
-		return ret;
 
 	endpoint = msg.msg1;
 	msgtype = FIELD_GET(APPLE_RTKIT_MGMT_TYPE, msg.msg0);
@@ -297,6 +295,54 @@ int apple_rtkit_poll(struct apple_rtkit *rtk, ulong timeout)
 			/* Just ignore it */
 			return 0;
 	}
+}
+
+int apple_rtkit_poll(struct apple_rtkit *rtk, ulong timeout)
+{
+	struct apple_mbox_msg msg;
+	int ret;
+
+	ret = mbox_recv(rtk->chan, &msg, timeout);
+	if (ret < 0)
+		return ret;
+
+	return apple_rtkit_handle(rtk, &msg);
+}
+
+/*
+ * Wait for the next message on an application endpoint, servicing the
+ * management and system endpoints (buffer requests, logs) meanwhile.
+ */
+int apple_rtkit_recv_app(struct apple_rtkit *rtk, int endpoint, u64 *msg0,
+			 ulong timeout)
+{
+	struct apple_mbox_msg msg;
+	ulong start = timer_get_us();
+	ulong elapsed;
+	int ret;
+
+	for (;;) {
+		elapsed = timer_get_us() - start;
+		if (elapsed >= timeout)
+			return -ETIMEDOUT;
+		ret = mbox_recv(rtk->chan, &msg, timeout - elapsed);
+		if (ret < 0)
+			return ret;
+		if (msg.msg1 == endpoint) {
+			*msg0 = msg.msg0;
+			return 0;
+		}
+		ret = apple_rtkit_handle(rtk, &msg);
+		if (ret < 0)
+			return ret;
+	}
+}
+
+int apple_rtkit_send_app(struct apple_rtkit *rtk, int endpoint, u64 msg0)
+{
+	struct apple_mbox_msg msg = { .msg0 = msg0, .msg1 = endpoint };
+
+	return mbox_send(rtk->chan, &msg);
 }
 
 static int apple_rtkit_boot_common(struct apple_rtkit *rtk, bool early_ap)
