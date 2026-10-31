@@ -763,7 +763,7 @@
 			reg = <0x03 0x82720000 0x00 0x08 0x03 0x827a4000 0x00 0x04>;
 		};
 
-		gpu@582600000 {
+		j704_gpu: gpu@582600000 {
 			operating-points-v2 = <&opp_table_agx>;
 			power-domains = <&soc_power_management_580e80000_power_controller_110>;
 			mboxes = <&soc_mailbox_582600000 &soc_mailbox_582e00000>;

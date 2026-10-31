@@ -4,6 +4,16 @@
  * Aura fills the aliases and platform-data children from this boot's ADT.
  */
 &{/} {
+    memory-performance@382700000 {
+        compatible = "apple,t8142-memory-performance";
+        reg = <0x3 0x82700000 0 0x10000>,
+              <0x3 0x82806000 0 0x3000>,
+              <0x5 0x80e01000 0 4>,
+              <0x5 0x80e80110 0 4>;
+        reg-names = "voters", "rails", "gpu-core-power", "gpu-pstate";
+        apple,gpu = <&j704_gpu>;
+    };
+
     j704-platform {
         compatible = "apple,j704-platform";
         apple,smc = <&smc>;
