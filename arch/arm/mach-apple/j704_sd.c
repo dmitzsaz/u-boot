@@ -867,10 +867,19 @@ void j704_sd_late_init(void)
 		  "fdt get value j704_bootargs /chosen bootargs; "
 		  "sysboot mmc ${j704_sdpart} any ${scriptaddr} ${j704_sdconf}; fi" },
 	};
+	const char *conf = ofnode_read_string(ofnode_path("/chosen"),
+					    "aurora,sd-extlinux-conf");
 	int i;
 
 	if (!strcmp(env_get("bootcmd") ?: "", CONFIG_BOOTCOMMAND))
-		env_set("bootcmd", "run j704_sdboot; bootflow scan -b");
+		env_set("bootcmd", conf ? "run j704_sdboot" :
+			"run j704_sdboot; bootflow scan -b");
+
+	/* An explicit image contract must not fall back to another kernel/DT
+	 * pair. Keep a saved environment override ahead of the loader choice.
+	 */
+	if (conf && !env_get("j704_sdconf"))
+		env_set("j704_sdconf", conf);
 
 	/* A saved or preboot environment may override any of these. */
 	for (i = 0; i < ARRAY_SIZE(env); i++) {
