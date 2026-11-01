@@ -1450,3 +1450,4 @@
 };
 
 /include/ "t8142-j704-platform.dtsi"
+/include/ "t8142-j704-audio.dtsi"

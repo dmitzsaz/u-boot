@@ -1,0 +1,215 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/*
+ * J704 audio coprocessor (AOP) and the 3.5 mm jack codec, hardware-verified
+ * on 2026-10-31/11-01 (RTKit boot, setup-port handshake, every AOP audio EPIC
+ * service announced, CS42L84 identified, headphone insertion detected).
+ *
+ * - The AOP setup port lives at AOP ASC + 0x4007c000 (0x3d067c000), as on the
+ *   A18. The ADT's aop-exclave-mailbox reg is already a CPU physical address
+ *   and must not be translated through the /arm-io ranges.
+ * - dart-aop is locked by iBoot with inherited roots; streams 0 (AOP),
+ *   1 (setup port) and 8 (base-ns ADMAC) use free 64 GiB slots.
+ * - The AOP firmware turns AUDIO_A/FR/P off during its audio init and polls
+ *   for ACTUAL == 0, so those domains are firmware-owned: the Linux pwrstate
+ *   driver would pin them on with AUTO_ENABLE.
+ *
+ * The AOP audio child and the jack card are added separately once playback
+ * through the jack is verified.
+ */
+
+&{/soc} {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	pmgr_aop: power-management@388284000 {
+		compatible = "apple,t8142-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		reg = <0x3 0x88284000 0x0 0x4000>;
+
+		ps_aop_filter: power-controller@0 {
+			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+			reg = <0x0 4>;
+			#power-domain-cells = <0>;
+			#reset-cells = <0>;
+			label = "aop_filter";
+			apple,always-on;
+		};
+
+		ps_aop_fr: power-controller@18 {
+			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+			reg = <0x18 4>;
+			#power-domain-cells = <0>;
+			#reset-cells = <0>;
+			label = "aop_fr";
+			power-domains = <&ps_aop_filter>;
+			apple,always-on;
+		};
+
+		ps_aop_dart: power-controller@20 {
+			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+			reg = <0x20 4>;
+			#power-domain-cells = <0>;
+			#reset-cells = <0>;
+			label = "aop_dart";
+			power-domains = <&ps_aop_filter>;
+			apple,always-on;
+		};
+
+		ps_aop_base: power-controller@78 {
+			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+			reg = <0x78 4>;
+			#power-domain-cells = <0>;
+			#reset-cells = <0>;
+			label = "aop_base";
+			power-domains = <&ps_aop_dart>;
+			apple,always-on;
+		};
+
+		ps_audio_a: power-controller@80 {
+			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+			reg = <0x80 4>;
+			#power-domain-cells = <0>;
+			#reset-cells = <0>;
+			label = "audio_a";
+			power-domains = <&ps_aop_dart>;
+			apple,firmware-owned;
+		};
+
+		ps_aop_cpu: power-controller@a8 {
+			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+			reg = <0xa8 4>;
+			#power-domain-cells = <0>;
+			#reset-cells = <0>;
+			label = "aop_cpu";
+			power-domains = <&ps_aop_base>, <&ps_aop_fr>;
+			apple,always-on;
+		};
+
+		ps_audio_fr: power-controller@b8 {
+			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+			reg = <0xb8 4>;
+			#power-domain-cells = <0>;
+			#reset-cells = <0>;
+			label = "audio_fr";
+			power-domains = <&ps_audio_a>;
+			apple,firmware-owned;
+		};
+
+		ps_audio_p: power-controller@d8 {
+			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+			reg = <0xd8 4>;
+			#power-domain-cells = <0>;
+			#reset-cells = <0>;
+			label = "audio_p";
+			power-domains = <&ps_audio_fr>;
+			apple,firmware-owned;
+		};
+
+		ps_audio_base_ns_a: power-controller@f8 {
+			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+			reg = <0xf8 4>;
+			#power-domain-cells = <0>;
+			#reset-cells = <0>;
+			label = "audio_base_ns_a";
+			power-domains = <&ps_audio_p>;
+		};
+	};
+
+	aop_dart: iommu@390fc0000 {
+		compatible = "apple,t8140-dart", "apple,t8110-dart";
+		reg = <0x3 0x90fc0000 0x0 0xc000>;
+		#iommu-cells = <1>;
+		interrupt-parent = <&aic>;
+		interrupts = <0 528 4>;
+		power-domains = <&ps_aop_base>;
+	};
+
+	aop_mbox: mailbox@390608000 {
+		compatible = "apple,t8140-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x3 0x90608000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <0 490 4>, <0 491 4>, <0 492 4>, <0 493 4>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		#mbox-cells = <0>;
+	};
+
+	aop_setup_mbox: mailbox@3d067c000 {
+		compatible = "apple,t8140-aop-setup-mailbox";
+		reg = <0x3 0xd067c000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <0 494 4>, <0 497 4>;
+		interrupt-names = "send-empty", "recv-not-empty";
+		iommus = <&aop_dart 1>;
+		apple,dma-range = <0x200 0x0 0x10 0x0>;
+		#mbox-cells = <0>;
+	};
+
+	aop: aop@390c00000 {
+		compatible = "apple,t8140-aop";
+		reg = <0x3 0x90c00000 0x0 0x1e0000>,
+		      <0x3 0x90600000 0x0 0x88000>;
+		reg-names = "mmio", "asc";
+		mboxes = <&aop_mbox>, <&aop_setup_mbox>;
+		mbox-names = "mbox", "setup";
+		iommus = <&aop_dart 0>;
+		apple,dma-range = <0x110 0x0 0x10 0x0>;
+		power-domains = <&ps_aop_cpu>;
+	};
+
+	admac_base_ns: dma-controller@393800000 {
+		compatible = "apple,t8140-admac";
+		reg = <0x3 0x93800000 0x0 0x34000>;
+		dma-channels = <13>;
+		interrupts-extended = <&aic 0 549 4>, <0>, <0>, <0>;
+		#dma-cells = <1>;
+		iommus = <&aop_dart 8>;
+		apple,dma-range = <0x110 0x0 0x0 0x10000000>;
+		power-domains = <&ps_audio_base_ns_a>;
+	};
+
+	pinctrl_nub: pinctrl@3881f0000 {
+		compatible = "apple,t8142-pinctrl";
+		reg = <0x3 0x881f0000 0x0 0x4000>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		gpio-ranges = <&pinctrl_nub 0 0 40>;
+		apple,npins = <40>;
+	};
+
+	i2c1: i2c@3a5014000 {
+		compatible = "apple,t8142-i2c", "apple,i2c";
+		reg = <0x3 0xa5014000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <0 1248 4>;
+		power-domains = <&ps_i2c1>;
+		clocks = <&clock_ref>;
+		clock-frequency = <100000>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		jack_codec: codec@4b {
+			compatible = "cirrus,cs42l84";
+			reg = <0x4b>;
+			/* The driver drives this line high to run the codec. */
+			reset-gpios = <&pinctrl_nub 18 0>;
+			interrupts-extended = <&soc_pinctrl_39a000000 100 8>;
+			#sound-dai-cells = <0>;
+			sound-name-prefix = "Jack";
+		};
+	};
+};
+
+&{/soc/power-management@380700000} {
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	ps_i2c1: power-controller@350 {
+		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x350 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "i2c1";
+	};
+};
