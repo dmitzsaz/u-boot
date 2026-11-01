@@ -10,7 +10,8 @@
 #include <abuf.h>
 #include <blk.h>
 #include <dm.h>
-#include <dm/ofnode.h>
+#include "luks_fdt.h"
+#include <mbedtls/platform_util.h>
 #include <hash.h>
 #include <json.h>
 #include <log.h>
@@ -22,12 +23,71 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <mbedtls/aes.h>
+#include <mbedtls/constant_time.h>
 #include <mbedtls/base64.h>
 #include <mbedtls/md.h>
 #include <mbedtls/pkcs5.h>
 #include <u-boot/sha256.h>
 #include <argon2.h>
 #include "luks_internal.h"
+
+/* Only validated primary metadata is used. Never modify/repair either header. */
+int luks2_read_header(struct udevice *blk, struct disk_partition *pinfo,
+		      char **out, u64 *size)
+{
+	struct blk_desc *desc = dev_get_uclass_plat(blk);
+	ALLOC_CACHE_ALIGN_BUFFER(u8, first, 4096);
+	struct luks2_hdr *hdr = (void *)first;
+	u8 expected[64], actual[64];
+	u64 hdr_size;
+	char *data;
+	int len = sizeof(actual), ret;
+
+	*out = NULL;
+	if ((desc->blksz != 512 && desc->blksz != 4096) ||
+	    pinfo->start > desc->lba || pinfo->size > desc->lba - pinfo->start ||
+	    pinfo->size < 4096 / desc->blksz)
+		return -EINVAL;
+	if (blk_read(blk, pinfo->start, 4096 / desc->blksz, first) !=
+	    4096 / desc->blksz)
+		return -EIO;
+	hdr_size = be64_to_cpu(hdr->hdr_size);
+	if (memcmp(hdr->magic, LUKS_MAGIC, LUKS_MAGIC_LEN) ||
+	    be16_to_cpu(hdr->version) != LUKS_VERSION_2 ||
+	    be64_to_cpu(hdr->hdr_offset) ||
+	    hdr_size < 16384 || hdr_size > 4 * 1024 * 1024 ||
+	    (hdr_size & (hdr_size - 1)) || hdr_size / desc->blksz > pinfo->size ||
+	    !memchr(hdr->csum_alg, 0, sizeof(hdr->csum_alg)) ||
+	    (strcmp(hdr->csum_alg, "sha256") && strcmp(hdr->csum_alg, "sha512")))
+		return -EINVAL;
+	data = malloc_cache_aligned(hdr_size);
+	if (!data)
+		return -ENOMEM;
+	if (blk_read(blk, pinfo->start, hdr_size / desc->blksz, data) !=
+	    hdr_size / desc->blksz) {
+		free(data);
+		return -EIO;
+	}
+	if (memcmp(data, first, 4096)) {
+		free(data);
+		return -EIO;
+	}
+	hdr = (void *)data;
+	memcpy(expected, hdr->csum, sizeof(expected));
+	memset(hdr->csum, 0, sizeof(hdr->csum));
+	ret = hash_block(hdr->csum_alg, data, hdr_size, actual, &len);
+	if (!ret && mbedtls_ct_memcmp(expected, actual, len))
+		ret = -EBADMSG;
+	if (!ret && !memchr(data + 4096, 0, hdr_size - 4096))
+		ret = -EINVAL;
+	if (ret) {
+		free(data);
+		return ret;
+	}
+	*out = data;
+	*size = hdr_size;
+	return 0;
+}
 
 /**
  * enum luks2_kdf_type - LUKS2 KDF type
@@ -125,6 +185,7 @@ struct luks2_keyslot {
 	const char *type;
 	u32 key_size;
 	struct luks2_kdf kdf;
+	const char *kdf_hash;
 	struct luks2_af af;
 	struct luks2_area area;
 };
@@ -169,29 +230,33 @@ static int base64_decode(const char *in, u8 *out, int out_len)
 }
 
 /**
- * read_digest_info() - Read LUKS2 digest information from ofnode
+ * read_digest_info() - Read LUKS2 digest information from struct luks_node
  *
- * @digest_node: ofnode for the digest (e.g., digest "0")
+ * @digest_node: struct luks_node for the digest (e.g., digest "0")
  * @digest: Pointer to digest structure to fill
  * Return: 0 on success, -ve on error
  */
-static int read_digest_info(ofnode digest_node, struct luks2_digest *digest)
+static int read_digest_info(struct luks_node digest_node, struct luks2_digest *digest)
 {
 	const char *salt_b64, *digest_b64;
 
 	const char *type_str;
 	int ret;
 
-	memset(digest, '\0', sizeof(*digest));
+	mbedtls_platform_zeroize(digest, sizeof(*digest));
 
 	/* Read and convert digest type */
-	type_str = ofnode_read_string(digest_node, "type");
+	type_str = luks_node_read_string(digest_node, "type");
 	ret = str_to_kdf_type(type_str);
 	if (ret < 0) {
 		log_debug("LUKS2: unsupported digest type %s\n", type_str);
 		return ret;
 	}
 	digest->type = ret;
+	if (digest->type != LUKS2_KDF_PBKDF2)
+		return -ENOTSUPP;
+	if (strcmp(luks_node_read_string(digest_node, "segments") ?: "", "0"))
+		return -ENOTSUPP;
 
 	/* Check if Argon2 is supported if needed */
 	if ((digest->type == LUKS2_KDF_ARGON2I ||
@@ -202,25 +267,25 @@ static int read_digest_info(ofnode digest_node, struct luks2_digest *digest)
 	}
 
 	/* Read hash algorithm */
-	digest->hash = ofnode_read_string(digest_node, "hash");
+	digest->hash = luks_node_read_string(digest_node, "hash");
 	if (!digest->hash)
 		return -EINVAL;
 
 	/* Read KDF-specific parameters */
 	if (digest->type == LUKS2_KDF_PBKDF2) {
 		/* PBKDF2 */
-		if (ofnode_read_u32(digest_node, "iterations", &digest->iters))
+		if (luks_node_read_u32(digest_node, "iterations", &digest->iters))
 			return -EINVAL;
 	} else {
 		/* Argon2 */
-		if (ofnode_read_u32(digest_node, "time", &digest->time) ||
-		    ofnode_read_u32(digest_node, "memory", &digest->memory) ||
-		    ofnode_read_u32(digest_node, "cpus", &digest->cpus))
+		if (luks_node_read_u32(digest_node, "time", &digest->time) ||
+		    luks_node_read_u32(digest_node, "memory", &digest->memory) ||
+		    luks_node_read_u32(digest_node, "cpus", &digest->cpus))
 			return -EINVAL;
 	}
 
 	/* Read and decode salt */
-	salt_b64 = ofnode_read_string(digest_node, "salt");
+	salt_b64 = luks_node_read_string(digest_node, "salt");
 	if (!salt_b64)
 		return -EINVAL;
 	digest->salt_len = base64_decode(salt_b64, digest->salt,
@@ -229,55 +294,56 @@ static int read_digest_info(ofnode digest_node, struct luks2_digest *digest)
 		return -EINVAL;
 
 	/* Read and decode digest */
-	digest_b64 = ofnode_read_string(digest_node, "digest");
+	digest_b64 = luks_node_read_string(digest_node, "digest");
 	if (!digest_b64)
 		return -EINVAL;
 	digest->digest_len = base64_decode(digest_b64, digest->digest,
 					   sizeof(digest->digest));
-	if (digest->digest_len <= 0)
+	if (digest->digest_len <= 0 || !digest->iters || digest->iters > 100000000)
 		return -EINVAL;
 
 	return 0;
 }
 
 /**
- * read_keyslot_info() - Read LUKS2 keyslot information from ofnode
+ * read_keyslot_info() - Read LUKS2 keyslot information from struct luks_node
  *
- * @keyslot_node: ofnode for the keyslot (e.g., keyslot "0")
+ * @keyslot_node: struct luks_node for the keyslot (e.g., keyslot "0")
  * @keyslot: Pointer to keyslot structure to fill
  * @hash_name: Hash name to use for AF (from digest)
  * Return: 0 on success, -ve on error
  */
-static int read_keyslot_info(ofnode keyslot_node, struct luks2_keyslot *keyslot,
+static int read_keyslot_info(struct luks_node keyslot_node, struct luks2_keyslot *keyslot,
 			     const char *hash_name)
 {
 	const char *salt_b64, *offset_str, *size_str;
-	ofnode kdf_node, af_node, area_node;
+	struct luks_node kdf_node, af_node, area_node;
 	int ret;
 
-	memset(keyslot, '\0', sizeof(*keyslot));
+	mbedtls_platform_zeroize(keyslot, sizeof(*keyslot));
 
 	/* Read keyslot type */
-	keyslot->type = ofnode_read_string(keyslot_node, "type");
+	keyslot->type = luks_node_read_string(keyslot_node, "type");
 	if (!keyslot->type || strcmp(keyslot->type, "luks2"))
 		return -EINVAL;
 
 	/* Read key size */
-	if (ofnode_read_u32(keyslot_node, "key_size", &keyslot->key_size))
+	if (luks_node_read_u32(keyslot_node, "key_size", &keyslot->key_size))
 		return -EINVAL;
 
 	/* Navigate to and read KDF node */
-	kdf_node = ofnode_find_subnode(keyslot_node, "kdf");
-	if (!ofnode_valid(kdf_node))
+	kdf_node = luks_node_find_subnode(keyslot_node, "kdf");
+	if (!luks_node_valid(kdf_node))
 		return -EINVAL;
 
-	offset_str = ofnode_read_string(kdf_node, "type");
+	offset_str = luks_node_read_string(kdf_node, "type");
 	ret = str_to_kdf_type(offset_str);
 	if (ret < 0) {
 		log_debug("LUKS2: unsupported KDF type %s\n", offset_str);
 		return ret;
 	}
 	keyslot->kdf.type = ret;
+	keyslot->kdf_hash = luks_node_read_string(kdf_node, "hash");
 
 	/* Check if Argon2 is supported if needed */
 	if ((keyslot->kdf.type == LUKS2_KDF_ARGON2I ||
@@ -288,7 +354,7 @@ static int read_keyslot_info(ofnode keyslot_node, struct luks2_keyslot *keyslot,
 	}
 
 	/* Read KDF salt */
-	salt_b64 = ofnode_read_string(kdf_node, "salt");
+	salt_b64 = luks_node_read_string(kdf_node, "salt");
 	if (!salt_b64)
 		return -EINVAL;
 	keyslot->kdf.salt_len = base64_decode(salt_b64, keyslot->kdf.salt,
@@ -298,50 +364,68 @@ static int read_keyslot_info(ofnode keyslot_node, struct luks2_keyslot *keyslot,
 
 	/* Read KDF-specific parameters */
 	if (keyslot->kdf.type == LUKS2_KDF_PBKDF2) {
-		if (ofnode_read_u32(kdf_node, "iterations", &keyslot->kdf.iters))
+		if (luks_node_read_u32(kdf_node, "iterations", &keyslot->kdf.iters))
 			return -EINVAL;
 	} else {
 		/* Argon2 */
-		if (ofnode_read_u32(kdf_node, "time", &keyslot->kdf.time) ||
-		    ofnode_read_u32(kdf_node, "memory", &keyslot->kdf.memory) ||
-		    ofnode_read_u32(kdf_node, "cpus", &keyslot->kdf.cpus))
+		if (luks_node_read_u32(kdf_node, "time", &keyslot->kdf.time) ||
+		    luks_node_read_u32(kdf_node, "memory", &keyslot->kdf.memory) ||
+		    luks_node_read_u32(kdf_node, "cpus", &keyslot->kdf.cpus))
 			return -EINVAL;
 	}
 
 	/* Navigate to and read AF node */
-	af_node = ofnode_find_subnode(keyslot_node, "af");
-	if (!ofnode_valid(af_node))
+	af_node = luks_node_find_subnode(keyslot_node, "af");
+	if (!luks_node_valid(af_node))
 		return -EINVAL;
 
-	if (ofnode_read_u32(af_node, "stripes", &keyslot->af.stripes))
+	if (luks_node_read_u32(af_node, "stripes", &keyslot->af.stripes))
 		keyslot->af.stripes = 4000;  /* Default */
 	keyslot->af.hash = hash_name;
 
 	/* Navigate to and read area node */
-	area_node = ofnode_find_subnode(keyslot_node, "area");
-	if (!ofnode_valid(area_node))
+	area_node = luks_node_find_subnode(keyslot_node, "area");
+	if (!luks_node_valid(area_node))
 		return -EINVAL;
 
 	/* Read offset and size (strings in LUKS2 JSON) */
-	offset_str = ofnode_read_string(area_node, "offset");
+	offset_str = luks_node_read_string(area_node, "offset");
 	if (!offset_str)
 		return -EINVAL;
 	keyslot->area.offset = simple_strtoull(offset_str, NULL, 10);
 
-	size_str = ofnode_read_string(area_node, "size");
+	size_str = luks_node_read_string(area_node, "size");
 	if (!size_str)
 		return -EINVAL;
 	keyslot->area.size = simple_strtoull(size_str, NULL, 10);
 
 	/* Read encryption mode */
-	keyslot->area.encryption = ofnode_read_string(area_node, "encryption");
+	keyslot->area.encryption = luks_node_read_string(area_node, "encryption");
 	if (!keyslot->area.encryption)
 		return -EINVAL;
 
 	/* Read area key size */
-	if (ofnode_read_u32(area_node, "key_size", &keyslot->area.key_size))
+	if (luks_node_read_u32(area_node, "key_size", &keyslot->area.key_size))
 		return -EINVAL;
 
+	if ((keyslot->key_size != 32 && keyslot->key_size != 64) ||
+	    (keyslot->area.key_size != 32 && keyslot->area.key_size != 64) ||
+	    !keyslot->af.stripes || keyslot->af.stripes > 65536 ||
+	    strcmp(keyslot->area.encryption, "aes-xts-plain64") ||
+	    keyslot->area.size < (u64)keyslot->key_size * keyslot->af.stripes ||
+	    keyslot->area.size > 16 * 1024 * 1024 ||
+	    (keyslot->key_size * keyslot->af.stripes) % 512 ||
+	    keyslot->kdf.type == LUKS2_KDF_ARGON2I ||
+	    (keyslot->kdf.type == LUKS2_KDF_PBKDF2 &&
+	     (!keyslot->kdf.iters || keyslot->kdf.iters > 100000000)) ||
+	    (keyslot->kdf.type == LUKS2_KDF_ARGON2ID &&
+	     (!keyslot->kdf.time || keyslot->kdf.time > 100 ||
+	      !keyslot->kdf.cpus || keyslot->kdf.cpus > 64 ||
+	      keyslot->kdf.memory > 2 * 1024 * 1024)))
+		return -ENOTSUPP;
+	keyslot->af.hash = luks_node_read_string(af_node, "hash");
+	if (!keyslot->af.hash)
+		return -EINVAL;
 	return 0;
 }
 
@@ -353,46 +437,28 @@ static int read_keyslot_info(ofnode keyslot_node, struct luks2_keyslot *keyslot,
  * @fdt_buf: Buffer to hold the converted FDT (caller must uninit)
  * @digest: Pointer to digest structure to fill
  * @md_type: Pointer to receive mbedtls MD type
- * @keyslots_node: Pointer to receive keyslots ofnode
+ * @keyslots_node: Pointer to receive keyslots struct luks_node
  * Return: 0 on success, -ve on error
  */
 static int read_luks2_info(struct udevice *blk, struct disk_partition *pinfo,
 			   struct abuf *fdt_buf, struct luks2_digest *digest,
-			   mbedtls_md_type_t *md_typep, ofnode *keyslots_nodep)
+			   mbedtls_md_type_t *md_typep, struct luks_node *keyslots_nodep)
 {
 	struct blk_desc *desc = dev_get_uclass_plat(blk);
-	ALLOC_CACHE_ALIGN_BUFFER(u8, buffer, desc->blksz);
-	ofnode root, digests_node, digest0;
+	struct luks_node root, digests_node, digest0;
 	struct hash_algo *hash_algo;
 	mbedtls_md_type_t md_type;
-	struct luks2_hdr *hdr;
-	ofnode keyslots_node;
+	struct luks_node keyslots_node;
 	char *json_data;
 	int count, ret;
 	u64 hdr_size;
-	oftree tree;
 
 	abuf_init(fdt_buf);
 
-	/* Read LUKS2 header */
-	if (blk_read(blk, pinfo->start, 1, buffer) != 1)
-		return -EIO;
-
-	hdr = (struct luks2_hdr *)buffer;
-	hdr_size = be64_to_cpu(hdr->hdr_size);
-
-	log_debug("LUKS2: header size %llu bytes\n", hdr_size);
-
-	/* Allocate and read full header with JSON */
-	count = (hdr_size + desc->blksz - 1) / desc->blksz;
-	json_data = malloc_cache_aligned(count * desc->blksz);
-	if (!json_data)
-		return -ENOMEM;
-
-	if (blk_read(blk, pinfo->start, count, json_data) != count) {
-		ret = -EIO;
-		goto out;
-	}
+	ret = luks2_read_header(blk, pinfo, &json_data, &hdr_size);
+	if (ret)
+		return ret;
+	count = hdr_size / desc->blksz;
 
 	ret = -EINVAL;
 
@@ -401,24 +467,17 @@ static int read_luks2_info(struct udevice *blk, struct disk_partition *pinfo,
 		log_err("Failed to convert JSON to FDT\n");
 		goto out;
 	}
-
-	/* Create oftree from FDT */
-	tree = oftree_from_fdt(abuf_data(fdt_buf));
-	if (!oftree_valid(tree))
-		goto out;
-
-	/* Get root node */
-	root = oftree_root(tree);
-	if (!ofnode_valid(root))
+	root = luks_fdt_root(abuf_data(fdt_buf));
+	if (!luks_node_valid(root))
 		goto out;
 
 	/* Navigate to digests node and get digest 0 */
-	digests_node = ofnode_find_subnode(root, "digests");
-	if (!ofnode_valid(digests_node))
+	digests_node = luks_node_find_subnode(root, "digests");
+	if (!luks_node_valid(digests_node))
 		goto out;
 
-	digest0 = ofnode_find_subnode(digests_node, "0");
-	if (!ofnode_valid(digest0))
+	digest0 = luks_node_find_subnode(digests_node, "0");
+	if (!luks_node_valid(digest0))
 		goto out;
 
 	/* Read digest information */
@@ -436,8 +495,8 @@ static int read_luks2_info(struct udevice *blk, struct disk_partition *pinfo,
 	md_type = hash_mbedtls_type(hash_algo);
 
 	/* Navigate to keyslots node */
-	keyslots_node = ofnode_find_subnode(root, "keyslots");
-	if (!ofnode_valid(keyslots_node)) {
+	keyslots_node = luks_node_find_subnode(root, "keyslots");
+	if (!luks_node_valid(keyslots_node)) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -446,7 +505,7 @@ static int read_luks2_info(struct udevice *blk, struct disk_partition *pinfo,
 	*keyslots_nodep = keyslots_node;
 
 out:
-	memset(json_data, '\0', count * desc->blksz);
+	mbedtls_platform_zeroize(json_data, count * desc->blksz);
 	free(json_data);
 	if (ret)
 		abuf_uninit(fdt_buf);
@@ -507,7 +566,7 @@ static int decrypt_km_xts(const u8 *derived_key, uint key_size, const u8 *km,
 		todo = (size - pos > blksize) ? blksize : (size - pos);
 
 		/* Prepare data_unit (sector number in little-endian) */
-		memset(data_unit, '\0', sizeof(data_unit));
+		mbedtls_platform_zeroize(data_unit, sizeof(data_unit));
 		for (int i = 0; i < 8; i++)
 			data_unit[i] = (sector >> (i * 8)) & 0xFF;
 
@@ -560,7 +619,7 @@ static int decrypt_km_cbc(const u8 *derived_key, uint key_size,
 		/* Plain CBC with zero IV */
 		u8 iv[AES_BLOCK_LENGTH];
 
-		memset(iv, '\0', sizeof(iv));
+		mbedtls_platform_zeroize(iv, sizeof(iv));
 		aes_cbc_decrypt_blocks(key_size * 8, expkey, iv, km, split_key,
 				       size / AES_BLOCK_LENGTH);
 	}
@@ -593,10 +652,18 @@ static int try_keyslot_pbkdf2(struct udevice *blk, struct disk_partition *pinfo,
 	struct blk_desc *desc = dev_get_uclass_plat(blk);
 	int ret, km_blocks, size;
 	u8 derived_key[128];
-	u8 *split_key, *km;
+	u8 *split_key = NULL, *km = NULL;
 
 	log_debug("LUKS2: trying keyslot with %u iters\n", ks->kdf.iters);
 
+	/* Keyslot KDF and volume digest may use different hashes. */
+	struct hash_algo *algo;
+	const char *hash = ks->kdf.type == LUKS2_KDF_PBKDF2 ?
+		ks->kdf_hash : NULL;
+
+	if (!hash || hash_lookup_algo(hash, &algo))
+		return -ENOTSUPP;
+	md_type = hash_mbedtls_type(algo);
 	/* Derive key from passphrase */
 	ret = mbedtls_pkcs5_pbkdf2_hmac_ext(md_type, pass, pass_len,
 					    ks->kdf.salt, ks->kdf.salt_len,
@@ -613,6 +680,13 @@ static int try_keyslot_pbkdf2(struct udevice *blk, struct disk_partition *pinfo,
 	km = malloc_cache_aligned(km_blocks * desc->blksz);
 	if (!split_key || !km) {
 		ret = -ENOMEM;
+		goto out;
+	}
+
+	if (ks->area.offset % desc->blksz ||
+	    ks->area.offset / desc->blksz >= pinfo->size ||
+	    km_blocks > pinfo->size - ks->area.offset / desc->blksz) {
+		ret = -EINVAL;
 		goto out;
 	}
 
@@ -642,14 +716,14 @@ static int try_keyslot_pbkdf2(struct udevice *blk, struct disk_partition *pinfo,
 
 out:
 	if (split_key) {
-		memset(split_key, '\0', size);
+		mbedtls_platform_zeroize(split_key, size);
 		free(split_key);
 	}
 	if (km) {
-		memset(km, '\0', km_blocks * desc->blksz);
+		mbedtls_platform_zeroize(km, km_blocks * desc->blksz);
 		free(km);
 	}
-	memset(derived_key, '\0', sizeof(derived_key));
+	mbedtls_platform_zeroize(derived_key, sizeof(derived_key));
 
 	return ret;
 }
@@ -662,7 +736,7 @@ static int try_keyslot_argon2(struct udevice *blk, struct disk_partition *pinfo,
 	struct blk_desc *desc = dev_get_uclass_plat(blk);
 	int ret, km_blocks, size;
 	u8 derived_key[128];
-	u8 *split_key, *km;
+	u8 *split_key = NULL, *km = NULL;
 
 	log_debug("LUKS2: trying keyslot with Argon2id (t=%u, m=%u, p=%u)\n",
 		  ks->kdf.time, ks->kdf.memory, ks->kdf.cpus);
@@ -692,6 +766,13 @@ static int try_keyslot_argon2(struct udevice *blk, struct disk_partition *pinfo,
 	km = malloc_cache_aligned(km_blocks * desc->blksz);
 	if (!split_key || !km) {
 		ret = -ENOMEM;
+		goto out;
+	}
+
+	if (ks->area.offset % desc->blksz ||
+	    ks->area.offset / desc->blksz >= pinfo->size ||
+	    km_blocks > pinfo->size - ks->area.offset / desc->blksz) {
+		ret = -EINVAL;
 		goto out;
 	}
 
@@ -728,14 +809,14 @@ static int try_keyslot_argon2(struct udevice *blk, struct disk_partition *pinfo,
 
 out:
 	if (split_key) {
-		memset(split_key, '\0', size);
+		mbedtls_platform_zeroize(split_key, size);
 		free(split_key);
 	}
 	if (km) {
-		memset(km, '\0', km_blocks * desc->blksz);
+		mbedtls_platform_zeroize(km, km_blocks * desc->blksz);
 		free(km);
 	}
-	memset(derived_key, '\0', sizeof(derived_key));
+	mbedtls_platform_zeroize(derived_key, sizeof(derived_key));
 
 	return ret;
 }
@@ -797,10 +878,12 @@ static int verify_master_key(const struct luks2_digest *digest,
 	}
 
 	log_debug("LUKS2: digest calculated, comparing...\n");
-	if (memcmp(calculated_digest, digest->digest, digest->digest_len)) {
+	if (mbedtls_ct_memcmp(calculated_digest, digest->digest, digest->digest_len)) {
 		log_debug("LUKS2: digest mismatch!\n");
+		mbedtls_platform_zeroize(calculated_digest, sizeof(calculated_digest));
 		return -EACCES;
 	}
+	mbedtls_platform_zeroize(calculated_digest, sizeof(calculated_digest));
 
 	log_debug("LUKS2: digest match, unlock successful\n");
 	memcpy(master_key, cand_key, key_size);
@@ -813,14 +896,14 @@ static int verify_master_key(const struct luks2_digest *digest,
  * try_unlock_keyslot() - Try to unlock a single keyslot and verify master key
  *
  * This function attempts to unlock one keyslot by:
- * 1. Reading keyslot metadata from ofnode
+ * 1. Reading keyslot metadata from struct luks_node
  * 2. Deriving the candidate master key using the appropriate KDF (or using
  *    pre-derived key directly)
  * 3. Verifying the candidate key against the stored digest
  *
  * @blk: Block device containing the LUKS partition
  * @pinfo: Partition information
- * @keyslot_node: ofnode for this specific keyslot
+ * @keyslot_node: struct luks_node for this specific keyslot
  * @digest: Digest information for verification
  * @md_type: mbedtls message digest type (for PBKDF2)
  * @pass: User-provided passphrase or pre-derived key
@@ -831,7 +914,7 @@ static int verify_master_key(const struct luks2_digest *digest,
  * Return: 0 if unlocked successfully, -EAGAIN to continue trying, -ve on error
  */
 static int try_unlock_keyslot(struct udevice *blk, struct disk_partition *pinfo,
-			      ofnode keyslot_node,
+			      struct luks_node keyslot_node,
 			      const struct luks2_digest *digest,
 			      mbedtls_md_type_t md_type, const u8 *pass,
 			      size_t pass_len, bool pre_derived,
@@ -880,7 +963,7 @@ static int try_unlock_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 		ret = verify_master_key(digest, md_type, cand_key,
 					keyslot.key_size, master_key,
 					&key_size);
-		memset(cand_key, '\0', sizeof(cand_key));
+		mbedtls_platform_zeroize(cand_key, sizeof(cand_key));
 		if (!ret) {
 			*key_sizep = key_size;
 			return 0; /* Success! */
@@ -888,7 +971,7 @@ static int try_unlock_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 		/* Verification failed, continue trying */
 	}
 
-	memset(cand_key, '\0', sizeof(cand_key));
+	mbedtls_platform_zeroize(cand_key, sizeof(cand_key));
 
 	return -EAGAIN; /* Continue trying other keyslots */
 }
@@ -897,7 +980,7 @@ int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
 		 const u8 *pass, size_t pass_len, bool pre_derived,
 		 u8 *master_key, uint *key_sizep)
 {
-	ofnode keyslots_node, keyslot_node;
+	struct luks_node keyslots_node, keyslot_node;
 	struct luks2_digest digest;
 	mbedtls_md_type_t md_type;
 	struct abuf fdt_buf;
@@ -911,7 +994,19 @@ int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
 
 	/* Try each keyslot until one succeeds */
 	ret = -EACCES;
-	ofnode_for_each_subnode(keyslot_node, keyslots_node) {
+	luks_node_for_each_subnode(keyslot_node, keyslots_node) {
+		struct luks_node dn = luks_node_find_subnode(
+			luks_node_find_subnode(luks_fdt_root(abuf_data(&fdt_buf)), "digests"), "0");
+		int slen;
+		const char *slots = fdt_getprop(dn.fdt, dn.offset, "keyslots", &slen);
+		const char *id = fdt_get_name(keyslot_node.fdt, keyslot_node.offset, NULL);
+		bool bound = false;
+
+		for (int pos = 0; slots && pos < slen; pos += strlen(slots + pos) + 1)
+			if (!strcmp(slots + pos, id))
+				bound = true;
+		if (!bound)
+			continue;
 		ret = try_unlock_keyslot(blk, pinfo, keyslot_node, &digest,
 					 md_type, pass, pass_len, pre_derived,
 					 master_key, key_sizep);

@@ -272,3 +272,14 @@ config RKMTD
 	  Enable "rkmtd" class and driver to create a virtual block device
 	  to transfer Rockchip boot block data to and from NAND with block
 	  orientate tools like "ums" and "rockusb".
+
+config BLK_LUKS
+	bool "Read-only LUKS encrypted block mappings"
+	depends on BLK && MBEDTLS_LIB_CRYPTO
+	select BLKMAP
+	select AES
+	select SHA256
+	select PBKDF2
+	select PKCS5_MBEDTLS
+	select JSON
+	select HASH

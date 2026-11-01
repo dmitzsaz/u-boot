@@ -3230,3 +3230,9 @@ config CMD_SPAWN_NUM_JOBS
 	  spawn command.
 
 endif
+
+config CMD_LUKS
+	bool "luks: unlock encrypted partitions (hidden interactive passphrase)"
+	depends on BLK
+	select BLK_LUKS
+	select ARGON2

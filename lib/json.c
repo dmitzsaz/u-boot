@@ -51,6 +51,7 @@ struct json_parser {
 	const char *tok_end;
 	void *fdt;
 	int fdt_size;
+	int depth;
 };
 
 /* Increment position in JSON string */
@@ -238,8 +239,11 @@ static enum json_token_type next_token(struct json_parser *ctx)
 			INC();
 		}
 		ctx->tok_end = ctx->pos;
-		if (*ctx->pos == '"')
-			INC();
+		if (*ctx->pos != '"') {
+			SET(JSONT_ERROR);
+			break;
+		}
+		INC();
 		SET(JSONT_STRING);
 		break;
 	}
@@ -514,7 +518,10 @@ static int parse_value(struct json_parser *ctx, const char *prop_name)
 		break;
 	case JSONT_LBRACE:
 		/* Nested object */
+		if (++ctx->depth > 16)
+			return -E2BIG;
 		ret = parse_object(ctx, prop_name);
+		ctx->depth--;
 		if (ret)
 			return ret;
 		break;

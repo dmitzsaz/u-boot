@@ -362,6 +362,8 @@ static int blkmap_dev_unbind(struct udevice *dev)
 
 	list_for_each_entry_safe(bms, tmp, &bm->slices, node) {
 		list_del(&bms->node);
+		if (bms->destroy)
+			bms->destroy(bm, bms);
 		free(bms);
 	}
 

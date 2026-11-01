@@ -9,6 +9,20 @@
 #define __LUKS_INTERNAL_H__
 
 #include <hash.h>
+#include <mbedtls/md.h>
+#include <linux/string.h>
+
+static inline mbedtls_md_type_t hash_mbedtls_type(const struct hash_algo *a)
+{
+	if (!strcmp(a->name, "sha256"))
+		return MBEDTLS_MD_SHA256;
+	if (!strcmp(a->name, "sha512"))
+		return MBEDTLS_MD_SHA512;
+	if (!strcmp(a->name, "sha1"))
+		return MBEDTLS_MD_SHA1;
+	return MBEDTLS_MD_NONE;
+}
+
 
 /**
  * af_merge() - Merge anti-forensic split key into original key
@@ -61,5 +75,8 @@ void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey, u8 *km,
 int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
 		 const u8 *pass, size_t pass_len, bool pre_derived,
 		 u8 *master_key, uint *key_sizep);
+
+int luks2_read_header(struct udevice *blk, struct disk_partition *pinfo,
+		      char **out, u64 *size);
 
 #endif /* __LUKS_INTERNAL_H__ */

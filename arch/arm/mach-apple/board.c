@@ -1278,6 +1278,41 @@ static int apple_alloc_kernel(phys_addr_t *addr)
 	return lmb_alloc_mem(LMB_MEM_ALLOC_ADDR, SZ_2M, addr, SZ_128M, LMB_NONE);
 }
 
+/* Explicit owner DT selection: no SD access or fallback to a different root. */
+static bool j704_luks_late_init(void)
+{
+	const char *part = ofnode_read_string(ofnode_path("/chosen"),
+					   "aurora,luks-partition");
+	const char *args = ofnode_read_string(ofnode_path("/chosen"),
+					   "aurora,luks-bootargs");
+
+	if (!IS_ENABLED(CONFIG_CMD_LUKS) || !part)
+		return false;
+	if (!env_get("j704_lukspart"))
+		env_set("j704_lukspart", part);
+	if (!args) {
+		env_set("bootcmd", "echo J704: missing encrypted-root bootargs");
+		return true;
+	}
+	env_set("j704_luksargs", args);
+	env_set("j704_luksboot",
+		"if fdt addr ${fdtcontroladdr} && "
+		"fdt get value bootargs /chosen bootargs; then "
+		"setenv bootargs ${bootargs} ${j704_luksargs}; "
+		"if luks unlock nvme ${j704_lukspart}; then "
+		"if load blkmap ${luksdev} ${kernel_addr_r} /boot/Image-j704 && "
+		"load blkmap ${luksdev} ${ramdisk_addr_r} /boot/initramfs-j704-crypt.img; then "
+		"setenv j704_initrd ${ramdisk_addr_r}:${filesize}; "
+		"if luks close; then "
+		"booti ${kernel_addr_r} ${j704_initrd} ${fdtcontroladdr}; fi; "
+		"else luks close; fi; fi; fi");
+	if (!strcmp(env_get("bootcmd") ?: "", CONFIG_BOOTCOMMAND))
+		env_set("bootcmd", "run j704_luksboot");
+	if (IS_ENABLED(CONFIG_APPLE_MTP_KEYB))
+		run_command("mtpkbd start", 0);
+	return true;
+}
+
 int board_late_init(void)
 {
 	u32 status = 0;
@@ -1288,7 +1323,7 @@ int board_late_init(void)
 
 	if (of_machine_is_compatible("apple,t8140"))
 		t8140_late_init();
-	if (of_machine_is_compatible("apple,j704"))
+	if (of_machine_is_compatible("apple,j704") && !j704_luks_late_init())
 		j704_sd_late_init();
 
 	/* somewhat based on the Linux Kernel boot requirements:

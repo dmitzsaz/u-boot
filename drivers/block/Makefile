@@ -22,3 +22,5 @@ obj-$(CONFIG_EFI_MEDIA) += efi-media-uclass.o
 obj-$(CONFIG_EFI_MEDIA_SANDBOX) += sb_efi_media.o
 obj-$(CONFIG_EFI_MEDIA_BLK) += efi_blk.o
 
+
+obj-$(CONFIG_BLK_LUKS) += luks.o luks2.o blkmap_crypt.o

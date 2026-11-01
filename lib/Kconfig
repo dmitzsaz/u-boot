@@ -1335,3 +1335,10 @@ config UTHREAD_STACK_SIZE
 endmenu
 
 source "lib/fwu_updates/Kconfig"
+
+config JSON
+	bool "JSON to flattened device tree conversion"
+	select OF_LIBFDT
+
+config ARGON2
+	bool "Argon2 password hashing"

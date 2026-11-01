@@ -6,9 +6,11 @@
  */
 
 #include <blk.h>
+#include <abuf.h>
 #include <blkmap.h>
 #include <dm.h>
-#include <dm/ofnode.h>
+#include "luks_fdt.h"
+#include <mbedtls/platform_util.h>
 #include <hash.h>
 #include <hexdump.h>
 #include <json.h>
@@ -210,10 +212,10 @@ int af_merge(const u8 *src, u8 *dst, size_t key_size, uint stripes,
 		return -ENOTSUPP;
 	}
 
-	if (key_size > sizeof(block_buf))
+	if (!key_size || !stripes || key_size > sizeof(block_buf))
 		return -E2BIG;
 
-	memset(block_buf, '\0', key_size);
+	mbedtls_platform_zeroize(block_buf, key_size);
 
 	/* Standard LUKS AF-merge algorithm */
 	for (i = 0; i < stripes - 1; i++) {
@@ -250,7 +252,6 @@ void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey,
 	sha256_csum_wd(derived_key, key_size, essiv_key_material,
 		       CHUNKSZ_SHA256);
 
-	log_debug_hex("ESSIV key[0-7]:", essiv_key_material, 8);
 
 	/* Expand ESSIV key for AES */
 	aes_expand_key(essiv_key_material, 256, essiv_expkey);
@@ -267,7 +268,7 @@ void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey,
 		 * Create IV: little-endian sector number padded to
 		 * 16 bytes
 		 */
-		memset(sector_iv, '\0', AES_BLOCK_LENGTH);
+		mbedtls_platform_zeroize(sector_iv, AES_BLOCK_LENGTH);
 		put_unaligned_le32(rel_sect, sector_iv);
 
 		/* Encrypt sector number with ESSIV key to get IV */
@@ -276,7 +277,7 @@ void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey,
 		/* Show the first sector for debugging */
 		if (!rel_sect) {
 			log_debug("rel_sect %x, ", rel_sect);
-			log_debug_hex("IV[0-7]:", iv, 8);
+
 		}
 
 		/* Decrypt this sector */
@@ -307,7 +308,7 @@ static int derive_key_pbkdf2(struct luks1_keyslot *slot, const u8 *pass,
 
 	/* Derive key from passphrase using PBKDF2 */
 	log_debug("PBKDF2(pass len=%zu, ", pass_len);
-	log_debug_hex("salt[0-7]", (u8 *)slot->salt, 8);
+
 	log_debug("iter %u, keylen %u)\n", iters, key_size);
 	ret = mbedtls_pkcs5_pbkdf2_hmac_ext(md_type, pass, pass_len,
 					    (const u8 *)slot->salt,
@@ -318,7 +319,6 @@ static int derive_key_pbkdf2(struct luks1_keyslot *slot, const u8 *pass,
 		return -EPROTO;
 	}
 
-	log_debug_hex("derived_key[0-7]", derived_key, 8);
 
 	return 0;
 }
@@ -385,16 +385,14 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 		return -EIO;
 	}
 
-	log_debug_hex("km[0-7]", km, 8);
 
 	/* Decrypt key material using derived key */
 	log_debug("expand key with key_size*8 %u bits\n", key_size * 8);
-	log_debug_hex("derived_key", derived_key, key_size);
+
 
 	/* Decrypt key material */
 	aes_expand_key(derived_key, key_size * 8, expkey);
 
-	log_debug_hex("expanded key [0-15]:", expkey, 16);
 
 	/* Decrypt with CBC mode: first check if ESSIV is used */
 	if (strstr(hdr->cipher_mode, "essiv")) {
@@ -403,12 +401,11 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 	} else {
 		/* Plain CBC with zero IV */
 		log_debug("using plain CBC mode\n");
-		memset(iv, '\0', sizeof(iv));
+		mbedtls_platform_zeroize(iv, sizeof(iv));
 		aes_cbc_decrypt_blocks(key_size * 8, expkey, iv, km, split_key,
 				       split_key_size / AES_BLOCK_LENGTH);
 	}
 
-	log_debug_hex("split_key[0-7]", split_key, 8);
 
 	/* Merge AF-split key */
 	ret = af_merge(split_key, candidate_key, key_size, stripes,
@@ -418,7 +415,6 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 		return ret;
 	}
 
-	log_debug_hex("candidate_key[0-7]", candidate_key, 8);
 
 	/* Verify master key by checking its digest */
 	ret = mbedtls_pkcs5_pbkdf2_hmac_ext(md_type, candidate_key, key_size,
@@ -431,8 +427,7 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 		return EPROTO;
 	}
 
-	log_debug_hex("key_digest[0-7]", key_digest, 8);
-	log_debug_hex("mk_digest[0-7]", (u8 *)hdr->mk_digest, 8);
+
 
 	/* Check if the digest matches */
 	if (!memcmp(key_digest, hdr->mk_digest, LUKS_DIGESTSIZE)) {
@@ -480,7 +475,7 @@ static int unlock_luks1(struct udevice *blk, struct disk_partition *pinfo,
 	/* Debug: show what we read from header */
 	log_debug("Read header at sector %llu, mk_digest[0-7] ",
 		  (unsigned long long)pinfo->start);
-	log_debug_hex("", (u8 *)hdr->mk_digest, 8);
+
 
 	/* Verify cipher mode - only CBC supported */
 	if (strncmp(hdr->cipher_mode, "cbc", 3)) {
@@ -573,18 +568,18 @@ static int unlock_luks1(struct udevice *blk, struct disk_partition *pinfo,
 
 out:
 	if (derived_key) {
-		memset(derived_key, '\0', key_size);
+		mbedtls_platform_zeroize(derived_key, key_size);
 		free(derived_key);
 	}
 	if (split_key) {
-		memset(split_key, '\0', split_key_size);
+		mbedtls_platform_zeroize(split_key, split_key_size);
 		free(split_key);
 	}
 	if (km) {
-		memset(km, '\0', km_blocks * desc->blksz);
+		mbedtls_platform_zeroize(km, km_blocks * desc->blksz);
 		free(km);
 	}
-	memset(candidate_key, '\0', sizeof(candidate_key));
+	mbedtls_platform_zeroize(candidate_key, sizeof(candidate_key));
 
 	return ret;
 }
@@ -651,7 +646,6 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 	enum blkmap_crypt_mode cipher_mode;
 	lbaint_t decrypted_size;
 	struct luks1_phdr *hdr;
-	struct luks2_hdr *hdr2;
 	struct blk_desc *desc;
 	struct udevice *dev;
 	uint payload_offset;
@@ -678,27 +672,15 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		/* LUKS2: Parse JSON for segment offset */
 		char *json_data;
 		u64 hdr_size, segment_offset;
-		int blocks;
 		struct abuf fdt_buf;
-		oftree tree;
-		ofnode root, segments_node, segment0_node;
+		struct luks_node root, segments_node, segment0_node;
 		const char *offset_str, *encryption;
 
 		abuf_init(&fdt_buf);
 
-		hdr2 = (struct luks2_hdr *)buf;
-		hdr_size = be64_to_cpu(hdr2->hdr_size);
-
-		/* Read full header with JSON */
-		blocks = (hdr_size + desc->blksz - 1) / desc->blksz;
-		json_data = malloc_cache_aligned(blocks * desc->blksz);
-		if (!json_data)
-			return -ENOMEM;
-
-		if (blk_read(blk, pinfo->start, blocks, json_data) != blocks) {
-			free(json_data);
-			return -EIO;
-		}
+		ret = luks2_read_header(blk, pinfo, &json_data, &hdr_size);
+		if (ret)
+			return ret;
 
 		/* Convert JSON to FDT */
 		ret = json_to_fdt(json_data + 4096, &fdt_buf);
@@ -707,41 +689,31 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 			free(json_data);
 			return -EINVAL;
 		}
-
-		/* Create oftree from FDT */
-		tree = oftree_from_fdt(abuf_data(&fdt_buf));
-		if (!oftree_valid(tree)) {
-			abuf_uninit(&fdt_buf);
-			free(json_data);
-			return -EINVAL;
-		}
-
-		/* Get root node */
-		root = oftree_root(tree);
-		if (!ofnode_valid(root)) {
+		root = luks_fdt_root(abuf_data(&fdt_buf));
+		if (!luks_node_valid(root)) {
 			abuf_uninit(&fdt_buf);
 			free(json_data);
 			return -EINVAL;
 		}
 
 		/* Navigate to segments node */
-		segments_node = ofnode_find_subnode(root, "segments");
-		if (!ofnode_valid(segments_node)) {
+		segments_node = luks_node_find_subnode(root, "segments");
+		if (!luks_node_valid(segments_node)) {
 			abuf_uninit(&fdt_buf);
 			free(json_data);
 			return -EINVAL;
 		}
 
 		/* Get first segment (segment 0) */
-		segment0_node = ofnode_find_subnode(segments_node, "0");
-		if (!ofnode_valid(segment0_node)) {
+		segment0_node = luks_node_find_subnode(segments_node, "0");
+		if (!luks_node_valid(segment0_node)) {
 			abuf_uninit(&fdt_buf);
 			free(json_data);
 			return -EINVAL;
 		}
 
 		/* Get offset (string in LUKS2 JSON) */
-		offset_str = ofnode_read_string(segment0_node, "offset");
+		offset_str = luks_node_read_string(segment0_node, "offset");
 		if (!offset_str) {
 			abuf_uninit(&fdt_buf);
 			free(json_data);
@@ -749,11 +721,24 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		}
 		segment_offset = simple_strtoull(offset_str, NULL, 10);
 
+		if (fdt_next_subnode(root.fdt, segment0_node.offset) >= 0 ||
+		    strcmp(luks_node_read_string(segment0_node, "type") ?: "", "crypt") ||
+		    strcmp(luks_node_read_string(segment0_node, "size") ?: "", "dynamic") ||
+		    strcmp(luks_node_read_string(segment0_node, "iv_tweak") ?: "", "0") ||
+		    strcmp(luks_node_read_string(segment0_node, "encryption") ?: "", "aes-xts-plain64") ||
+		    fdt_getprop(root.fdt, segment0_node.offset, "flags", NULL) ||
+		    segment_offset % desc->blksz ||
+		    segment_offset / desc->blksz >= pinfo->size ||
+		    segment_offset / desc->blksz > UINT_MAX) {
+			abuf_uninit(&fdt_buf);
+			free(json_data);
+			return -ENOTSUPP;
+		}
 		/* Convert byte offset to sectors */
 		payload_offset = segment_offset / desc->blksz;
 
 		/* Parse cipher mode from encryption string */
-		encryption = ofnode_read_string(segment0_node, "encryption");
+		encryption = luks_node_read_string(segment0_node, "encryption");
 		if (encryption) {
 			use_essiv = strstr(encryption, "essiv");
 			/* Check if XTS mode is used */
@@ -767,7 +752,7 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		}
 
 		/* Read sector_size if present */
-		if (ofnode_read_u32(segment0_node, "sector_size", &sector_size)) {
+		if (luks_node_read_u32(segment0_node, "sector_size", &sector_size)) {
 			/* If not found, default to 512 */
 			sector_size = 512;
 		}
@@ -776,6 +761,7 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		abuf_uninit(&fdt_buf);
 		free(json_data);
 	} else {
+		return -ENOTSUPP;
 		/* LUKS1 */
 		hdr = (struct luks1_phdr *)buf;
 
@@ -834,7 +820,7 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 
 	/* Wipe ESSIV key from stack */
 	if (use_essiv)
-		memset(essiv_key, '\0', sizeof(essiv_key));
+		mbedtls_platform_zeroize(essiv_key, sizeof(essiv_key));
 	*blkmapp = dev;
 
 	return 0;

@@ -13,6 +13,7 @@
 #include <memalign.h>
 #include <uboot_aes.h>
 #include <mbedtls/aes.h>
+#include <mbedtls/platform_util.h>
 #include <dm/device-internal.h>
 #include <linux/string.h>
 #include "blkmap_internal.h"
@@ -100,7 +101,7 @@ static int process_xts_sector(struct blkmap_crypt *bmc,
 	 * For plain64 IV mode, the IV is the 512-byte sector number,
 	 * not the larger XTS sector number. This matches dm-crypt behavior.
 	 */
-	iv_sector = start_blk;
+	iv_sector = start_blk * (blksz / 512);
 	memset(data_unit, '\0', sizeof(data_unit));
 	for (j = 0; j < 8; j++)
 		data_unit[j] = (iv_sector >> (j * 8)) & 0xff;
@@ -164,13 +165,15 @@ static ulong crypt_read_xts(struct blkmap *bm, struct blkmap_crypt *bmc,
 	u8 *buf;
 	int ret;
 
+	if (!blkcnt)
+		return 0;
 	blks_per_sect = bmc->sector_size / bd->blksz;
 
 	log_debug("key_size=%u blkcnt=" LBAFU "\n", bmc->key_size, blkcnt);
 	log_debug("XTS: sector_size=%u blocks_per_sector=%u\n",
 		  bmc->sector_size, blks_per_sect);
 	log_debug("Master key (all %u bytes):\n", bmc->key_size);
-	log_debug_hex("", bmc->master_key, bmc->key_size);
+
 
 	/* Calculate which encryption sectors we need */
 	start_sector = blknr / blks_per_sect;
@@ -219,7 +222,7 @@ static ulong crypt_read_xts(struct blkmap *bm, struct blkmap_crypt *bmc,
 		  " blocks\n", blkcnt);
 	if (blknr == 0 && blkcnt >= 1) {
 		log_debug("First 32 bytes of decrypted data:\n");
-		log_debug_hex("", out_buf, 32);
+
 	}
 
 	return blkcnt;
@@ -304,6 +307,13 @@ static ulong blkmap_crypt_read(struct blkmap *bm, struct blkmap_slice *bms,
 	u8 *encrypted_buf;
 	ulong result;
 
+	if (!blkcnt || blknr > bms->blkcnt || blkcnt > bms->blkcnt - blknr)
+		return 0;
+	if (bmc->cipher_mode == BLKMAP_CRYPT_MODE_XTS) {
+		result = crypt_read_xts(bm, bmc, blknr, blkcnt, buffer);
+		return (long)result < 0 ? 0 : result;
+	}
+
 	/* Allocate buffer for encrypted data */
 	encrypted_buf = malloc_cache_aligned(blkcnt * src_bd->blksz);
 	if (!encrypted_buf)
@@ -324,7 +334,7 @@ static ulong blkmap_crypt_read(struct blkmap *bm, struct blkmap_slice *bms,
 
 	if (blknr == 0 && blkcnt >= 1) {
 		log_debug("First 32 bytes of ENCRYPTED data:\n");
-		log_debug_hex("", encrypted_buf, 32);
+
 	}
 
 	if (bmc->cipher_mode == BLKMAP_CRYPT_MODE_XTS) {
@@ -348,8 +358,8 @@ static void blkmap_crypt_destroy(struct blkmap *bm, struct blkmap_slice *bms)
 	struct blkmap_crypt *bmc = container_of(bms, struct blkmap_crypt, slice);
 
 	/* Securely wipe master key before freeing */
-	memset(bmc->master_key, '\0', sizeof(bmc->master_key));
-	free(bmc);
+	mbedtls_platform_zeroize(bmc->master_key, sizeof(bmc->master_key));
+	mbedtls_platform_zeroize(bmc->essiv_key, sizeof(bmc->essiv_key));
 }
 
 int blkmap_map_crypt(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
@@ -362,10 +372,24 @@ int blkmap_map_crypt(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
 	struct blkmap_crypt *bmc;
 	int err;
 
-	if (key_size > 128)
-		return -EINVAL;
+	struct blk_desc *src = dev_get_uclass_plat(lblk);
+	struct blk_desc *dst = dev_get_uclass_plat(bm->blk);
 
-	bmc = malloc(sizeof(*bmc));
+	if (!master_key || cipher_mode != BLKMAP_CRYPT_MODE_XTS ||
+	    (key_size != 32 && key_size != 64) ||
+	    (src->blksz != 512 && src->blksz != 4096) ||
+	    (sector_size != 512 && sector_size != 4096) ||
+	    sector_size < src->blksz || sector_size % src->blksz ||
+	    !blkcnt || lblknr > src->lba ||
+	    payload_offset > src->lba - lblknr ||
+	    blkcnt > src->lba - lblknr - payload_offset ||
+	    blkcnt % (sector_size / src->blksz))
+		return -EINVAL;
+	/* blkmap defaults to 512. Filesystems must see the backing block size. */
+	dst->blksz = src->blksz;
+	dst->log2blksz = src->log2blksz;
+
+	bmc = calloc(1, sizeof(*bmc));
 	if (!bmc)
 		return -ENOMEM;
 
@@ -390,8 +414,10 @@ int blkmap_map_crypt(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
 	bmc->slice.destroy = blkmap_crypt_destroy;
 
 	err = blkmap_slice_add(bm, &bmc->slice);
-	if (err)
+	if (err) {
+		mbedtls_platform_zeroize(bmc, sizeof(*bmc));
 		free(bmc);
+	}
 
 	return err;
 }

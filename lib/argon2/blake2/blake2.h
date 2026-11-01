@@ -25,7 +25,7 @@
 extern "C" {
 #endif
 
-enum blake2b_constant {
+enum argon2_blake2b_constant {
     BLAKE2B_BLOCKBYTES = 128,
     BLAKE2B_OUTBYTES = 64,
     BLAKE2B_KEYBYTES = 64,
@@ -46,7 +46,7 @@ typedef struct __blake2b_param {
     uint8_t reserved[14];                    /* 32 */
     uint8_t salt[BLAKE2B_SALTBYTES];         /* 48 */
     uint8_t personal[BLAKE2B_PERSONALBYTES]; /* 64 */
-} blake2b_param;
+} argon2_blake2b_param;
 #pragma pack(pop)
 
 typedef struct __blake2b_state {
@@ -57,30 +57,30 @@ typedef struct __blake2b_state {
     unsigned buflen;
     unsigned outlen;
     uint8_t last_node;
-} blake2b_state;
+} argon2_blake2b_state;
 
 /* Ensure param structs have not been wrongly padded */
 /* Poor man's static_assert */
 enum {
     blake2_size_check_0 = 1 / !!(CHAR_BIT == 8),
     blake2_size_check_2 =
-        1 / !!(sizeof(blake2b_param) == sizeof(uint64_t) * CHAR_BIT)
+        1 / !!(sizeof(argon2_blake2b_param) == sizeof(uint64_t) * CHAR_BIT)
 };
 
 /* Streaming API */
-ARGON2_LOCAL int blake2b_init(blake2b_state *S, size_t outlen);
-ARGON2_LOCAL int blake2b_init_key(blake2b_state *S, size_t outlen, const void *key,
+ARGON2_LOCAL int argon2_blake2b_init(argon2_blake2b_state *S, size_t outlen);
+ARGON2_LOCAL int argon2_blake2b_init_key(argon2_blake2b_state *S, size_t outlen, const void *key,
                      size_t keylen);
-ARGON2_LOCAL int blake2b_init_param(blake2b_state *S, const blake2b_param *P);
-ARGON2_LOCAL int blake2b_update(blake2b_state *S, const void *in, size_t inlen);
-ARGON2_LOCAL int blake2b_final(blake2b_state *S, void *out, size_t outlen);
+ARGON2_LOCAL int argon2_blake2b_init_param(argon2_blake2b_state *S, const argon2_blake2b_param *P);
+ARGON2_LOCAL int argon2_blake2b_update(argon2_blake2b_state *S, const void *in, size_t inlen);
+ARGON2_LOCAL int argon2_blake2b_final(argon2_blake2b_state *S, void *out, size_t outlen);
 
 /* Simple API */
-ARGON2_LOCAL int blake2b(void *out, size_t outlen, const void *in, size_t inlen,
+ARGON2_LOCAL int argon2_blake2b(void *out, size_t outlen, const void *in, size_t inlen,
                          const void *key, size_t keylen);
 
 /* Argon2 Team - Begin Code */
-ARGON2_LOCAL int blake2b_long(void *out, size_t outlen, const void *in, size_t inlen);
+ARGON2_LOCAL int argon2_blake2b_long(void *out, size_t outlen, const void *in, size_t inlen);
 /* Argon2 Team - End Code */
 
 #if defined(__cplusplus)

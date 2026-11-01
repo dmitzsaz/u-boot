@@ -87,3 +87,10 @@ mbedtls_lib_tls-y := \
 	$(MBEDTLS_LIB_DIR)/ecp_curves.o \
 	$(MBEDTLS_LIB_DIR)/ecp_curves_new.o \
 	$(MBEDTLS_LIB_DIR)/gcm.o \
+
+mbedtls_lib_crypto-$(CONFIG_$(PHASE_)PKCS5_MBEDTLS) += $(MBEDTLS_LIB_DIR)/pkcs5.o
+mbedtls_lib_crypto-$(CONFIG_BLK_LUKS) += \
+	$(MBEDTLS_LIB_DIR)/aes.o \
+	$(MBEDTLS_LIB_DIR)/base64.o \
+	$(MBEDTLS_LIB_DIR)/cipher.o \
+	$(MBEDTLS_LIB_DIR)/cipher_wrap.o

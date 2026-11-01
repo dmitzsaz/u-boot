@@ -231,6 +231,10 @@ config HKDF_MBEDTLS
 	  This option enables support of key derivation using HKDF algorithm
 	  with MbedTLS crypto library.
 
+config PKCS5_MBEDTLS
+	bool "PKCS#5 PBKDF2 support"
+	depends on MBEDTLS_LIB_CRYPTO
+
 endif # MBEDTLS_LIB_CRYPTO
 
 config MBEDTLS_LIB_X509
