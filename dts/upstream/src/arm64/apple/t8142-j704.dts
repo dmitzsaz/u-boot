@@ -53,6 +53,7 @@
 		pmp = "/soc/pmp@380500000";
 		dcp = "/soc/dcp@286e00000";
 		disp0 = "/display-subsystem";
+		disp0_piodma = &soc_dcp_286e00000_piodma;
 		dcpext1 = "/soc/dcp@3aae00000";
 	};
 
