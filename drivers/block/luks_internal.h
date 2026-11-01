@@ -1,0 +1,65 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
+/*
+ * LUKS (Linux Unified Key Setup) internal interfaces
+ *
+ * Copyright (C) 2025 Canonical Ltd
+ */
+
+#ifndef __LUKS_INTERNAL_H__
+#define __LUKS_INTERNAL_H__
+
+#include <hash.h>
+
+/**
+ * af_merge() - Merge anti-forensic split key into original key
+ *
+ * This performs the LUKS AF-merge operation to recover the original key from
+ * its AF-split representation. The algorithm XORs all stripes together,
+ * applying diffusion between each stripe. Used by both LUKS1 and LUKS2.
+ *
+ * @src:	AF-split key material (key_size * stripes bytes)
+ * @dst:	Output buffer for merged key (key_size bytes)
+ * @key_size:	Size of the original key
+ * @stripes:	Number of anti-forensic stripes
+ * @hash_spec:	Hash algorithm name (e.g., "sha256")
+ * Return:	0 on success, -ve on error
+ */
+int af_merge(const u8 *src, u8 *dst, size_t key_size, uint stripes,
+	     const char *hash_spec);
+
+/**
+ * essiv_decrypt() - Decrypt key material using ESSIV mode
+ *
+ * ESSIV (Encrypted Salt-Sector Initialization Vector) mode generates a unique
+ * IV for each sector by encrypting the sector number with a key derived from
+ * hashing the encryption key. Used by both LUKS1 and LUKS2.
+ *
+ * @derived_key: Key derived from passphrase
+ * @key_size: Size of the encryption key in bytes
+ * @expkey: Expanded AES key for decryption
+ * @km: Encrypted key material buffer
+ * @split_key: Output buffer for decrypted key material
+ * @km_blocks: Number of blocks of key material
+ * @blksz: Block size in bytes
+ */
+void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey, u8 *km,
+		   u8 *split_key, uint km_blocks, uint blksz);
+
+/**
+ * unlock_luks2() - Unlock a LUKS2 partition with a passphrase
+ *
+ * @blk:	Block device
+ * @pinfo:	Partition information
+ * @pass:	Passphrase to unlock the partition or pre-derived key
+ * @pass_len:	Length of the passphrase in bytes
+ * @pre_derived: True if pass is a pre-derived key, false for passphrase
+ * @master_key:	Buffer to receive the decrypted master key
+ * @key_sizep:	Returns the key size
+ * Return:	0 on success, -EACCES if no keyslots matched, other -ve on other
+ * error
+ */
+int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
+		 const u8 *pass, size_t pass_len, bool pre_derived,
+		 u8 *master_key, uint *key_sizep);
+
+#endif /* __LUKS_INTERNAL_H__ */

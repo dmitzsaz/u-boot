@@ -11,6 +11,14 @@
 #include <dm/lists.h>
 
 /**
+ * enum blkmap_crypt_mode - Cipher mode for encrypted block devices
+ */
+enum blkmap_crypt_mode {
+	BLKMAP_CRYPT_MODE_CBC = 0,	/* AES-CBC */
+	BLKMAP_CRYPT_MODE_XTS = 1,	/* AES-XTS */
+};
+
+/**
  * struct blkmap - Block map
  *
  * Data associated with a blkmap.
@@ -67,6 +75,33 @@ int blkmap_map_mem(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
  */
 int blkmap_map_pmem(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
 		    phys_addr_t paddr, bool preserve);
+
+/**
+ * blkmap_map_crypt() - Map region of encrypted device
+ *
+ * Creates a mapping that performs on-the-fly decryption of the specified
+ * region from another block device. Suitable for LUKS and other encrypted
+ * block devices.
+ *
+ * @dev: Blkmap to create the mapping on
+ * @blknr: Start block number of the mapping
+ * @blkcnt: Number of blocks to map
+ * @lblk: The target block device containing encrypted data
+ * @lblknr: The start block number of the encrypted partition
+ * @master_key: Decrypted master key for decryption
+ * @key_size: Size of the master key in bytes (must be <= 128)
+ * @payload_offset: Offset in sectors from lblknr to actual encrypted payload
+ * @cipher_mode: Cipher mode (CBC or XTS)
+ * @sector_size: Sector size for IV calculation (typically 512 or 4096)
+ * @use_essiv: True to use ESSIV mode, false for plain64 mode (CBC only)
+ * @essiv_key: ESSIV key (SHA256 of master key), or NULL if use_essiv is false
+ * Returns: 0 on success, negative error code on failure
+ */
+int blkmap_map_crypt(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
+		     struct udevice *lblk, lbaint_t lblknr,
+		     const u8 *master_key, u32 key_size, u32 payload_offset,
+		     enum blkmap_crypt_mode cipher_mode, u32 sector_size,
+		     bool use_essiv, const u8 *essiv_key);
 
 /**
  * blkmap_from_label() - Find blkmap from label
