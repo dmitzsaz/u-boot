@@ -204,6 +204,25 @@ bool sart_add_allowed_region(struct apple_sart *sart, void *paddr, size_t sz)
 	return false;
 }
 
+bool sart_is_allowed_region(struct apple_sart *sart, u64 addr, size_t size)
+{
+	unsigned int i;
+
+	if (!size || addr > (u64)-1 - size)
+		return false;
+	for (i = 0; i < APPLE_SART_MAX_ENTRIES; i++) {
+		void *paddr;
+		size_t span;
+		u8 flags;
+
+		sart->get_entry(sart, i, &flags, &paddr, &span);
+		if (flags == APPLE_SART_FLAGS_ALLOW && addr >= (u64)paddr &&
+		    size <= span && addr - (u64)paddr <= span - size)
+			return true;
+	}
+	return false;
+}
+
 bool sart_remove_allowed_region(struct apple_sart *sart, void *paddr, size_t sz)
 {
 	for (unsigned int i = 0; i < APPLE_SART_MAX_ENTRIES; ++i) {

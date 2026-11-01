@@ -211,6 +211,22 @@ static int j704_sd_power(void)
 	return 0;
 }
 
+/* SD and ANS share these gates; complete the existing producer only once. */
+int j704_pcie_prepare_power(void)
+{
+	static bool attempted;
+	static int result;
+
+	if (!of_machine_is_compatible("apple,j704") ||
+	    !of_machine_is_compatible("apple,t8142"))
+		return -ENODEV;
+	if (!attempted) {
+		attempted = true;
+		result = j704_sd_power();
+	}
+	return result;
+}
+
 /* Common PHY initialization (pcie-cold); skipped once it already runs. */
 static int j704_sd_phy(void)
 {
@@ -777,7 +793,7 @@ static int j704_sd_init(void)
 		return ret;
 	/* Never replay a partially completed hardware startup. */
 	j704_sd_started = true;
-	ret = j704_sd_power();
+	ret = j704_pcie_prepare_power();
 	if (!ret)
 		ret = j704_sd_phy();
 	if (!ret)

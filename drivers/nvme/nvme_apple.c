@@ -6,6 +6,8 @@
 #include <dm.h>
 #include <mailbox.h>
 #include <mapmem.h>
+#include <lmb.h>
+#include <power-domain.h>
 #include "nvme.h"
 #include <reset.h>
 #include <time.h>
@@ -19,6 +21,7 @@
 #include <linux/delay.h>
 #include <linux/iopoll.h>
 #include <linux/sizes.h>
+#include <linux/libfdt.h>
 
 /* ASC registers */
 #define REG_CPU_CTRL		0x0044
@@ -93,6 +96,8 @@ struct ans_nvmmu_tcb {
  */
 struct apple_nvme_hw {
 	bool post_m4;
+	bool quiesced_boot;
+	bool lsq_in_nvmmu;
 	/* Highest namespace ID to expose, 0 for all */
 	u32 max_ns_id;
 };
@@ -119,6 +124,46 @@ static const struct apple_nvme_hw apple_nvme_t8132_hw = {
 	.max_ns_id = 1,
 };
 
+static const struct apple_nvme_hw apple_nvme_t8142_hw = {
+	.post_m4 = true,
+	.quiesced_boot = true,
+	.lsq_in_nvmmu = true,
+	.max_ns_id = 1,
+};
+
+/* Keep every live DMA page across both failed probing and OS handoff. */
+#define ANS_BOOT_RANGES 16
+static struct {
+	bool attempted;
+	bool ready;
+	u32 count;
+	struct { u64 start, size; } ranges[ANS_BOOT_RANGES];
+} ans_boot;
+
+static int apple_nvme_retain_dma(void *buffer, size_t size)
+{
+	u64 addr = map_to_sysmem(buffer);
+	u64 start, end;
+	unsigned int i;
+
+	if (!size || size > (u64)-1 - addr ||
+	    addr + size > (u64)-1 - (SZ_16K - 1))
+		return -EINVAL;
+	start = ALIGN_DOWN(addr, SZ_16K);
+	end = ALIGN(addr + size, SZ_16K);
+	for (i = 0; i < ans_boot.count; i++) {
+		if (ans_boot.ranges[i].start != start)
+			continue;
+		ans_boot.ranges[i].size = max(ans_boot.ranges[i].size, end - start);
+		return 0;
+	}
+	if (ans_boot.count == ANS_BOOT_RANGES)
+		return -EINVAL;
+	ans_boot.ranges[ans_boot.count].start = start;
+	ans_boot.ranges[ans_boot.count++].size = end - start;
+	return 0;
+}
+
 struct apple_nvme_priv {
 	struct nvme_dev ndev;
 	const struct apple_nvme_hw *hw;
@@ -128,17 +173,22 @@ struct apple_nvme_priv {
 	struct reset_ctl_bulk resets; /* ASC reset */
 	struct mbox_chan chan;
 	bool adopted_mbox;	/* chan carries an adopted RTKit session */
+	bool queues_retired;
 	struct apple_sart *sart;
 	struct apple_rtkit *rtk;
 	struct ans_nvmmu_tcb *tcbs[NVME_Q_NUM]; /* Submission queue TCBs */
 	u32 __iomem *q_db[NVME_Q_NUM]; /* Submission queue doorbell */
 };
 
+static void *apple_nvme_lsq(struct apple_nvme_priv *priv)
+{
+	return priv->hw->lsq_in_nvmmu ? priv->nvmmu : priv->base;
+}
+
 static int apple_nvme_setup_queue(struct nvme_queue *nvmeq)
 {
 	struct apple_nvme_priv *priv =
 		container_of(nvmeq->dev, struct apple_nvme_priv, ndev);
-	struct nvme_dev *dev = nvmeq->dev;
 
 	switch (nvmeq->qid) {
 	case NVME_ADMIN_Q:
@@ -153,17 +203,28 @@ static int apple_nvme_setup_queue(struct nvme_queue *nvmeq)
 		return -ENOMEM;
 
 	memset((void *)priv->tcbs[nvmeq->qid], 0, ANS_NVMMU_TCB_SIZE);
+	if (priv->hw->quiesced_boot) {
+		int ret;
+
+		ret = apple_nvme_retain_dma(priv->tcbs[nvmeq->qid], ANS_NVMMU_TCB_SIZE);
+		ret = ret ?: apple_nvme_retain_dma(nvmeq->sq_cmds,
+				nvmeq->q_depth * sizeof(struct nvme_command));
+		ret = ret ?: apple_nvme_retain_dma(nvmeq->cqes,
+				nvmeq->q_depth * sizeof(struct nvme_completion));
+		if (ret)
+			return ret;
+	}
 
 	switch (nvmeq->qid) {
 	case NVME_ADMIN_Q:
 		priv->q_db[nvmeq->qid] =
-			((void __iomem *)dev->bar) + ANS_ASQ_DB;
+			apple_nvme_lsq(priv) + ANS_ASQ_DB;
 		nvme_writeq((ulong)priv->tcbs[nvmeq->qid],
 			    priv->nvmmu + ANS_NVMMU_BASE_ASQ);
 		break;
 	case NVME_IO_Q:
 		priv->q_db[nvmeq->qid] =
-			((void __iomem *)dev->bar) + ANS_IOSQ_DB;
+			apple_nvme_lsq(priv) + ANS_IOSQ_DB;
 		nvme_writeq((ulong)priv->tcbs[nvmeq->qid],
 			    priv->nvmmu + ANS_NVMMU_BASE_IOSQ);
 		break;
@@ -181,7 +242,7 @@ static void apple_nvme_submit_cmd(struct nvme_queue *nvmeq,
 	u16 tail = nvmeq->sq_tail;
 
 	tcb = ((void *)priv->tcbs[nvmeq->qid]) + tail * ANS_NVMMU_TCB_PITCH;
-	memset(tcb, 0, sizeof(*tcb));
+	memset(tcb, 0, ANS_NVMMU_TCB_PITCH);
 	if (priv->hw->post_m4) {
 		/* Post-M4 firmware checks the DMA direction against the command. */
 		tcb->opcode = 0;
@@ -213,7 +274,7 @@ static void apple_nvme_complete_cmd(struct nvme_queue *nvmeq,
 	u16 tail = nvmeq->sq_tail;
 
 	tcb = ((void *)priv->tcbs[nvmeq->qid]) + tail * ANS_NVMMU_TCB_PITCH;
-	memset(tcb, 0, sizeof(*tcb));
+	memset(tcb, 0, ANS_NVMMU_TCB_PITCH);
 	writel(tail, priv->nvmmu + ANS_NVMMU_TCB_INVAL);
 	readl(priv->nvmmu + ANS_NVMMU_TCB_STAT);
 
@@ -226,14 +287,42 @@ static int nvme_shmem_setup(void *cookie, struct apple_rtkit_buffer *buf)
 {
 	struct apple_nvme_priv *priv = (struct apple_nvme_priv *)cookie;
 
-	if (!buf || buf->dva || !buf->size)
+	if (!buf || !buf->size)
 		return -1;
+	if (buf->dva) {
+		ofnode parent = ofnode_path("/reserved-memory"), child;
+		u64 reg[2], ram[2];
+
+		if (!priv->hw->quiesced_boot ||
+		    !IS_ALIGNED(buf->dva, SZ_16K) ||
+		    ofnode_read_u64_array(ofnode_path("/memory"), "reg", ram, 2) ||
+		    buf->size > ram[1] || buf->dva < ram[0] ||
+		    buf->dva - ram[0] > ram[1] - buf->size ||
+		    !sart_is_allowed_region(priv->sart, buf->dva, buf->size))
+			return -EINVAL;
+		ofnode_for_each_subnode(child, parent) {
+			if (ofnode_read_bool(child, "no-map") ||
+			    ofnode_read_u64_array(child, "reg", reg, 2) ||
+			    buf->size > reg[1] || buf->dva < reg[0] ||
+			    buf->dva - reg[0] > reg[1] - buf->size)
+				continue;
+			buf->buffer = map_sysmem(buf->dva, buf->size);
+			return apple_nvme_retain_dma(buf->buffer, buf->size);
+		}
+		return -EINVAL;
+	}
 
 	buf->buffer = memalign(SZ_16K, ALIGN(buf->size, SZ_16K));
 	if (!buf->buffer)
 		return -ENOMEM;
+	memset(buf->buffer, 0, ALIGN(buf->size, SZ_16K));
+	flush_dcache_range((ulong)buf->buffer,
+			   (ulong)buf->buffer + ALIGN(buf->size, SZ_16K));
+	if (priv->hw->quiesced_boot &&
+	    apple_nvme_retain_dma(buf->buffer, ALIGN(buf->size, SZ_16K)))
+		return -ENOSPC;
 
-	if (!sart_add_allowed_region(priv->sart, buf->buffer, buf->size)) {
+	if (!sart_add_allowed_region(priv->sart, buf->buffer, ALIGN(buf->size, SZ_16K))) {
 		free(buf->buffer);
 		buf->buffer = NULL;
 		buf->size = 0;
@@ -251,9 +340,12 @@ static void nvme_shmem_destroy(void *cookie, struct apple_rtkit_buffer *buf)
 
 	if (!buf)
 		return;
+	if (priv->hw->quiesced_boot && ans_boot.attempted)
+		return;
 
 	if (buf->buffer) {
-		sart_remove_allowed_region(priv->sart, buf->buffer, buf->size);
+		sart_remove_allowed_region(priv->sart, buf->buffer,
+					   ALIGN(buf->size, SZ_16K));
 		free(buf->buffer);
 		buf->buffer = NULL;
 		buf->size = 0;
@@ -294,6 +386,18 @@ static int apple_nvme_poll(struct nvme_dev *ndev)
 	bool ack;
 	u64 type;
 	int i;
+	int ret;
+
+	if (priv->hw->quiesced_boot && priv->rtk) {
+		for (i = 0; i < ANS_MBOX_POLL_MAX; i++) {
+			ret = apple_rtkit_poll(priv->rtk, 0);
+			if (ret == -ETIMEDOUT || ret == -EAGAIN || ret == -ENODATA)
+				return 0;
+			if (ret)
+				return ret;
+		}
+		return 0;
+	}
 
 	if (!priv->adopted_mbox)
 		return 0;
@@ -393,8 +497,8 @@ static int apple_nvme_setup_post_m4(struct apple_nvme_priv *priv)
 	struct udevice *dev = priv->ndev.udev;
 	u32 ioqa;
 
-	writel(ANS_LINEAR_SQ_CTRL_EN, priv->base + ANS_LINEAR_SQ_CTRL);
-	if (!(readl(priv->base + ANS_LINEAR_SQ_CTRL) & ANS_LINEAR_SQ_CTRL_EN)) {
+	writel(ANS_LINEAR_SQ_CTRL_EN, apple_nvme_lsq(priv) + ANS_LINEAR_SQ_CTRL);
+	if (!(readl(apple_nvme_lsq(priv) + ANS_LINEAR_SQ_CTRL) & ANS_LINEAR_SQ_CTRL_EN)) {
 		dev_err(dev, "failed to enable linear submission queues\n");
 		return -EIO;
 	}
@@ -472,6 +576,56 @@ static int apple_nvme_adopt(struct udevice *dev)
 	return 0;
 }
 
+/* iBoot leaves ANS resident and its storage power domains active. */
+static int apple_nvme_wake_quiesced(struct udevice *dev)
+{
+	struct apple_nvme_priv *priv = dev_get_priv(dev);
+	const char *handoff = dev_read_string(dev, "apple,rtkit-handoff");
+	ofnode node;
+	u32 phandle;
+	int ret;
+
+	if (ans_boot.attempted)
+		return -EALREADY;
+	if (!handoff || strcmp(handoff, "nvme-quiesced-v1"))
+		return -EINVAL;
+	if (!apple_nvme_ans_running(priv) ||
+	    readl(&priv->ndev.bar->cc) & NVME_CC_ENABLE ||
+	    readl(&priv->ndev.bar->csts) ||
+	    nvme_readq(priv->base + ANS_IOSQ_BASE) ||
+	    nvme_readq(priv->base + ANS_IOCQ_BASE) ||
+	    !(readl(apple_nvme_lsq(priv) + ANS_LINEAR_SQ_CTRL) & ANS_LINEAR_SQ_CTRL_EN) ||
+	    nvme_readq(priv->nvmmu + ANS_NVMMU_BASE_ASQ) ||
+	    nvme_readq(priv->nvmmu + ANS_NVMMU_BASE_IOSQ) ||
+	    readl(priv->nvmmu + ANS_NVMMU_TCB_STAT))
+		return -EBUSY;
+	ret = mbox_get_by_index(dev, 0, &priv->chan);
+	if (ret)
+		return ret;
+	ret = dev_read_u32(dev, "apple,sart", &phandle);
+	if (ret)
+		return ret;
+	node = ofnode_get_by_phandle(phandle);
+	priv->sart = sart_init(node);
+	if (!priv->sart)
+		return -EINVAL;
+	priv->rtk = apple_rtkit_init(&priv->chan, priv, nvme_shmem_setup,
+				     nvme_shmem_destroy);
+	if (!priv->rtk)
+		return -ENOMEM;
+	/* No CPU_RUN toggle, reset, or second attempt on a started session. */
+	ans_boot.attempted = true;
+	ret = apple_rtkit_boot(priv->rtk);
+	if (!ret)
+		ret = apple_rtkit_set_ap_power(priv->rtk, APPLE_RTKIT_PWR_STATE_ON);
+	if (ret)
+		return ret;
+	ret = apple_nvme_setup_post_m4(priv);
+	if (!ret)
+		priv->ndev.max_q_depth = ANS_MAX_QUEUE_DEPTH;
+	return ret;
+}
+
 /*
  * Recover from a command that never completed.  Post-M4 firmware cannot be
  * restarted, but stopping the controller gives up its commands and stops
@@ -510,6 +664,16 @@ static int apple_nvme_reset_ctrl(struct nvme_dev *ndev)
 		    priv->nvmmu + ANS_NVMMU_BASE_IOSQ);
 
 	return 0;
+}
+
+static int apple_nvme_quiesce(struct nvme_dev *ndev)
+{
+	struct apple_nvme_priv *priv =
+		container_of(ndev, struct apple_nvme_priv, ndev);
+
+	if (!priv->hw->post_m4)
+		return -EOPNOTSUPP;
+	return apple_nvme_disable_post_m4(priv);
 }
 
 static int apple_nvme_boot(struct udevice *dev)
@@ -578,6 +742,30 @@ static int apple_nvme_boot(struct udevice *dev)
  */
 static bool apple_nvme_adopt_failed;
 
+static int apple_nvme_check_retained_power(struct udevice *dev)
+{
+	struct ofnode_phandle_args args;
+	struct power_domain pd;
+	int i, ret;
+
+	if (dev_count_phandle_with_args(dev, "power-domains", "#power-domain-cells", 0) != 3)
+		return -EINVAL;
+	for (i = 0; i < 3; i++) {
+		ret = dev_read_phandle_with_args(dev, "power-domains",
+						 "#power-domain-cells", 0, i, &args);
+		if (ret || !ofnode_device_is_compatible(args.node,
+							"apple,t8142-pmgr-pwrstate") ||
+		    !ofnode_read_bool(args.node, "apple,inherited-on"))
+			return ret ?: -EINVAL;
+		ret = power_domain_get_by_index(dev, &pd, i);
+		if (!ret)
+			ret = power_domain_on(&pd);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 static int apple_nvme_probe(struct udevice *dev)
 {
 	struct apple_nvme_priv *priv = dev_get_priv(dev);
@@ -588,12 +776,25 @@ static int apple_nvme_probe(struct udevice *dev)
 		return -ENODEV;
 
 	priv->hw = (const struct apple_nvme_hw *)dev_get_driver_data(dev);
+	if (priv->hw->quiesced_boot) {
+		ret = apple_nvme_check_retained_power(dev);
+		if (ret)
+			return ret;
+	}
 
 	if (priv->hw->post_m4) {
+		fdt_size_t nvme_size, asc_size, nvmmu_size;
+
 		priv->base = dev_read_addr_name_ptr(dev, "nvme");
 		priv->asc = dev_read_addr_name_ptr(dev, "ans");
 		priv->nvmmu = dev_read_addr_name_ptr(dev, "nvmmu");
 		if (!priv->base || !priv->asc || !priv->nvmmu)
+			return -EINVAL;
+		if (priv->hw->quiesced_boot &&
+		    (dev_read_addr_size_name(dev, "nvme", &nvme_size) == FDT_ADDR_T_NONE ||
+		     dev_read_addr_size_name(dev, "ans", &asc_size) == FDT_ADDR_T_NONE ||
+		     dev_read_addr_size_name(dev, "nvmmu", &nvmmu_size) == FDT_ADDR_T_NONE ||
+		     nvme_size < 0x1214 || asc_size < 0x48 || nvmmu_size < 0x28124))
 			return -EINVAL;
 	} else {
 		priv->base = dev_read_addr_ptr(dev);
@@ -609,7 +810,9 @@ static int apple_nvme_probe(struct udevice *dev)
 	priv->ndev.bar = priv->base;
 	priv->ndev.udev = dev;
 
-	if (priv->hw->post_m4)
+	if (priv->hw->quiesced_boot)
+		ret = apple_nvme_wake_quiesced(dev);
+	else if (priv->hw->post_m4)
 		ret = apple_nvme_adopt(dev);
 	else
 		ret = apple_nvme_boot(dev);
@@ -623,8 +826,12 @@ static int apple_nvme_probe(struct udevice *dev)
 	priv->ndev.max_ns_id = priv->hw->max_ns_id;
 
 	ret = nvme_init(dev);
+	if (!ret && priv->hw->quiesced_boot)
+		ret = apple_nvme_retain_dma(priv->ndev.prp_pool, SZ_4K);
 	if (ret && priv->hw->post_m4)
 		apple_nvme_adopt_failed = true;
+	if (!ret && priv->hw->quiesced_boot)
+		ans_boot.ready = true;
 
 	return ret;
 }
@@ -650,8 +857,9 @@ static int apple_nvme_remove(struct udevice *dev)
 		 * not flush here: on the A18 Pro a Flush to one of Apple's small
 		 * system namespaces (2 to 4) is fatal to the firmware.
 		 */
-		if (nvme_retire_io_queues(dev))
+		if (!priv->queues_retired && nvme_retire_io_queues(dev))
 			printf("%s: could not delete the I/O queues\n", dev->name);
+		priv->queues_retired = true;
 		nvme_writeq(0, priv->base + ANS_IOSQ_BASE);
 		nvme_writeq(0, priv->base + ANS_IOCQ_BASE);
 		printf("%s: handing over the live ANS session (CC %#x CSTS %#x)\n",
@@ -679,6 +887,74 @@ static int apple_nvme_remove(struct udevice *dev)
 	return 0;
 }
 
+int apple_nvme_fdt_fixup(void *blob)
+{
+	struct uclass *uc;
+	struct udevice *dev;
+	struct apple_nvme_priv *priv = NULL;
+	int node, parent, sub, ret;
+	unsigned int i;
+	char name[64];
+	fdt64_t reg[2];
+
+	if (!ans_boot.attempted)
+		return 0;
+	/* A failed startup must never be advertised as still quiesced. */
+	if (!uclass_get(UCLASS_NVME, &uc)) {
+		uclass_foreach_dev(dev, uc) {
+			if (device_active(dev) &&
+			    device_is_compatible(dev, "apple,t8142-nvme-ans2")) {
+				priv = dev_get_priv(dev);
+				break;
+			}
+		}
+	}
+	if (priv && ans_boot.ready && !priv->queues_retired) {
+		if (priv->ndev.failed)
+			ans_boot.ready = false;
+		ret = nvme_retire_io_queues(dev);
+		if (ret) {
+			ans_boot.ready = false;
+		} else {
+			nvme_writeq(0, priv->base + ANS_IOSQ_BASE);
+			nvme_writeq(0, priv->base + ANS_IOCQ_BASE);
+			priv->queues_retired = true;
+		}
+	}
+	/* Reservation nodes intentionally have no no-map: Linux maps them WB. */
+	for (i = 0; i < ans_boot.count; i++) {
+		parent = fdt_path_offset(blob, "/reserved-memory");
+		if (parent < 0 || fdt_address_cells(blob, parent) != 2 ||
+		    fdt_size_cells(blob, parent) != 2)
+			return -EINVAL;
+		snprintf(name, sizeof(name), "ans-uboot@%llx", ans_boot.ranges[i].start);
+		sub = fdt_subnode_offset(blob, parent, name);
+		if (sub == -FDT_ERR_NOTFOUND)
+			sub = fdt_add_subnode(blob, parent, name);
+		reg[0] = cpu_to_fdt64(ans_boot.ranges[i].start);
+		reg[1] = cpu_to_fdt64(ans_boot.ranges[i].size);
+		if (sub < 0 || fdt_getprop(blob, sub, "no-map", NULL) ||
+		    fdt_setprop(blob, sub, "reg", reg, sizeof(reg)))
+			return -ENOSPC;
+	}
+	node = fdt_path_offset(blob, "nvme");
+	if (node < 0)
+		return node;
+	if (!priv || !ans_boot.ready) {
+		printf("ANS startup failed; retaining DMA buffers and disabling OS storage\n");
+		return fdt_setprop_string(blob, node, "status", "disabled");
+	}
+	if (!apple_nvme_ans_running(priv) ||
+	    !(readl(&priv->ndev.bar->cc) & NVME_CC_ENABLE) ||
+	    readl(&priv->ndev.bar->csts) != NVME_CSTS_RDY)
+		return -EIO;
+	ret = fdt_setprop_string(blob, node, "apple,rtkit-handoff", "nvme-running-v1");
+	if (!ret)
+		printf("ANS: live RTKit handoff, I/O queues retired, %u DMA reservations\n",
+		       ans_boot.count);
+	return ret;
+}
+
 static const struct nvme_ops apple_nvme_ops = {
 	.setup_queue = apple_nvme_setup_queue,
 	.submit_cmd = apple_nvme_submit_cmd,
@@ -686,9 +962,12 @@ static const struct nvme_ops apple_nvme_ops = {
 	.queue_created = apple_nvme_queue_created,
 	.poll = apple_nvme_poll,
 	.reset_ctrl = apple_nvme_reset_ctrl,
+	.quiesce = apple_nvme_quiesce,
 };
 
 static const struct udevice_id apple_nvme_ids[] = {
+	{ .compatible = "apple,t8142-nvme-ans2",
+	  .data = (ulong)&apple_nvme_t8142_hw },
 	{ .compatible = "apple,t8103-nvme-ans2",
 	  .data = (ulong)&apple_nvme_t8103_hw },
 	{ .compatible = "apple,t8132-nvme-ans2",

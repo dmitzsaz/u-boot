@@ -13,6 +13,7 @@
 #include <malloc.h>
 #include <memalign.h>
 #include <time.h>
+#include <vsprintf.h>
 #include <dm/device-internal.h>
 #include <linux/compat.h>
 #include "nvme.h"
@@ -250,6 +251,21 @@ static int nvme_reap_timed_out(struct nvme_queue *nvmeq, unsigned int timeout)
 
 static int nvme_reset_ctrl(struct nvme_dev *dev);
 
+static void nvme_quiesce_failed_io(struct nvme_dev *dev)
+{
+	struct nvme_ops *ops = (struct nvme_ops *)dev->udev->driver->ops;
+	int ret;
+
+	if (!ops || !ops->quiesce)
+		return;
+	ret = ops->quiesce(dev);
+	if (ret == -EOPNOTSUPP)
+		return;
+	if (ret)
+		panic("NVMe DMA did not stop; reset is required before reusing memory\n");
+	dev->failed = true;
+}
+
 static int nvme_submit_sync_cmd(struct nvme_queue *nvmeq,
 				struct nvme_command *cmd,
 				u32 *result, unsigned timeout)
@@ -271,6 +287,7 @@ static int nvme_submit_sync_cmd(struct nvme_queue *nvmeq,
 	 */
 	if (nvme_reap_timed_out(nvmeq, timeout) &&
 	    (nvmeq->dev->failed || nvme_reset_ctrl(nvmeq->dev))) {
+		nvme_quiesce_failed_io(nvmeq->dev);
 		printf("Error: nvme: queue %d still has a command outstanding\n",
 		       nvmeq->qid);
 		return -EIO;
@@ -289,12 +306,14 @@ static int nvme_submit_sync_cmd(struct nvme_queue *nvmeq,
 			break;
 		if (nvme_poll_ctrl(nvmeq->dev)) {
 			nvmeq->timed_out = true;
+			nvme_quiesce_failed_io(nvmeq->dev);
 			return -EIO;
 		}
 		if (timeout_us > 0 && (timer_get_us() - start_time)
 		    >= timeout_us) {
 			pr_warn("nvme: cmd %#x timed out\n", cmd->common.command_id);
 			nvmeq->timed_out = true;
+			nvme_quiesce_failed_io(nvmeq->dev);
 			return -ETIMEDOUT;
 		}
 	}
@@ -366,15 +385,17 @@ static struct nvme_queue *nvme_alloc_queue(struct nvme_dev *dev,
 	nvmeq->q_db = &dev->dbs[qid * 2 * dev->db_stride];
 	nvmeq->q_depth = depth;
 	nvmeq->qid = qid;
+
+	ops = (struct nvme_ops *)dev->udev->driver->ops;
+	if (ops && ops->setup_queue && ops->setup_queue(nvmeq))
+		goto free_sq;
 	dev->queue_count++;
 	dev->queues[qid] = nvmeq;
 
-	ops = (struct nvme_ops *)dev->udev->driver->ops;
-	if (ops && ops->setup_queue)
-		ops->setup_queue(nvmeq);
-
 	return nvmeq;
 
+ free_sq:
+	free(nvmeq->sq_cmds);
  free_queue:
 	free((void *)nvmeq->cqes);
  free_nvmeq:
@@ -526,8 +547,10 @@ static int nvme_configure_admin_queue(struct nvme_dev *dev)
 
  free_nvmeq:
 	/* A controller reset keeps its queues even if it fails. */
-	if (allocated)
+	if (allocated) {
+		nvme_quiesce_failed_io(dev);
 		nvme_free_queues(dev, 0);
+	}
 
 	return result;
 }

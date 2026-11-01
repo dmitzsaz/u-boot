@@ -748,6 +748,13 @@ struct nvme_ops {
 	 *         value on error
 	 */
 	int (*reset_ctrl)(struct nvme_dev *dev);
+	/**
+	 * quiesce - Stop DMA before returning a timed-out command to its caller
+	 *
+	 * Return: 0 if DMA stopped, -EOPNOTSUPP to retain legacy behavior,
+	 * or another error if the caller's buffer cannot safely be released.
+	 */
+	int (*quiesce)(struct nvme_dev *dev);
 };
 
 /**

@@ -9,6 +9,9 @@
 
 struct nvme_dev;
 
+/* Preserve live Apple ANS buffers and publish its OS handoff, if started. */
+int apple_nvme_fdt_fixup(void *blob);
+
 /**
  * nvme_identify - identify controller or namespace capabilities and status
  *

@@ -1091,6 +1091,14 @@ static char *asahi_esp_devpart(void)
 					   &len);
 	}
 
+	/* ANS is scanned before the SD boot command powers their shared gates. */
+	if (IS_ENABLED(CONFIG_J704_SD) && of_machine_is_compatible("apple,j704")) {
+		ret = j704_pcie_prepare_power();
+		if (ret) {
+			log_warning("J704: shared storage power is not ready (%d)\n", ret);
+			return devpart;
+		}
+	}
 	nvme_scan_namespace();
 	for (devnum = 0, part = 0; ; devnum++) {
 		nvme_blk = blk_get_devnum_by_uclass_id(UCLASS_NVME, devnum);
@@ -1327,6 +1335,12 @@ int ft_board_setup(void *blob, struct bd_info *bd)
 	struct udevice *dev;
 	const char *stdoutname;
 	int node, ret;
+
+	if (IS_ENABLED(CONFIG_NVME_APPLE)) {
+		ret = apple_nvme_fdt_fixup(blob);
+		if (ret)
+			return ret;
+	}
 
 	/* Coprocessors handed over running must be described in every case. */
 	if (IS_ENABLED(CONFIG_APPLE_MTP_KEYB)) {

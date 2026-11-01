@@ -50,6 +50,9 @@
 		atcphy3 = "/soc/phy@41b000000";
 		usb3 = "/soc/usb@41a280000";
 		gpu = "/soc/gpu@582600000";
+		nvme = &nvme;
+		ans-mailbox = &ans_mbox;
+		ans-sart = &ans_sart;
 		pmp = "/soc/pmp@380500000";
 		dcp = "/soc/dcp@286e00000";
 		disp0 = "/display-subsystem";
@@ -311,6 +314,9 @@
 		};
 
 		soc_dcp_3aae00000: dcp@3aae00000 {
+			apple,pmp-report = <&j704_pmp_atc2>;
+			#address-cells = <2>;
+			#size-cells = <2>;
 			dp2hdmi-pwren-gpios = <&soc_smc_38c600000_gpio 0x1a 0x0>;
 			hdmi-pwren-gpios = <&soc_smc_38c600000_gpio 0xf 0x0>;
 			hdmi-hpd-gpios = <&soc_pinctrl_39a000000 0x29 0x0>;
@@ -442,6 +448,41 @@
 			compatible = "apple,t8142-asc-mailbox", "apple,asc-mailbox-v4";
 		};
 
+		ans_mbox: mailbox@481608000 {
+			compatible = "apple,t8142-asc-mailbox", "apple,asc-mailbox-v4";
+			reg = <0x4 0x81608000 0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <0 1143 4>, <0 1144 4>, <0 1145 4>, <0 1146 4>;
+			interrupt-names = "send-empty", "send-not-empty",
+					  "recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+			power-domains = <&ps_ans>;
+			status = "disabled";
+		};
+
+		ans_sart: sart@485c50000 {
+			compatible = "apple,t8142-sart", "apple,t6000-sart";
+			reg = <0x4 0x85c50000 0 0xc000>;
+			power-domains = <&ps_ans>;
+			status = "disabled";
+		};
+
+		nvme: nvme@4c5cc0000 {
+			compatible = "apple,t8142-nvme-ans2";
+			reg = <0x4 0xc5cc0000 0 0x10000>,
+			      <0x4 0x81600000 0 0x4000>,
+			      <0x4 0x85cc0000 0 0x60000>;
+			reg-names = "nvme", "ans", "nvmmu";
+			interrupt-parent = <&aic>;
+			interrupts = <0 1155 4>;
+			mboxes = <&ans_mbox>;
+			apple,sart = <&ans_sart>;
+			apple,pmp-report = <&j704_pmp_ans>;
+			power-domains = <&ps_ans>, <&ps_apcie_sys_st>, <&ps_apcie_phy_sw>;
+			power-domain-names = "ans", "apcie0", "apcie_phy";
+			status = "disabled";
+		};
+
 		soc_power_management_382730000: power-management@382730000 {
 			#apple,bw-doorbell-cells = <0x02>;
 			#apple,bw-scratch-cells = <0x03>;
@@ -459,7 +500,7 @@
 			compatible = "apple,t8142-pmp-v2-report";
 			status = "disabled";
 
-			report@1f {
+			j704_pmp_atc2: report@1f {
 				apple,always-on;
 				apple,soc-device-record;
 				#power-domain-cells = <0x00>;
@@ -468,7 +509,7 @@
 				compatible = "apple,t8142-pmp-v2-report-entry";
 			};
 
-			report@21 {
+			j704_pmp_ans: report@21 {
 				apple,no-ack;
 				apple,always-on;
 				apple,soc-device-record;
@@ -704,6 +745,8 @@
 		};
 
 		soc_dcp_286e00000: dcp@286e00000 {
+			#address-cells = <2>;
+			#size-cells = <2>;
 			clocks = <&clock_ref>;
 			apple,iomfb-surfaces = <0x00 0x00 0x01 0x00>;
 			apple,bw-doorbell = <&soc_power_management_382720000 0x1 0x6>;
@@ -908,6 +951,49 @@
 			reg = <0x03 0x80700000 0x00 0x4000>;
 			#address-cells = <0x01>;
 			#size-cells = <0x01>;
+
+			ps_ans: power-controller@300 {
+				compatible = "apple,t8142-pmgr-pwrstate",
+					     "apple,t8103-pmgr-pwrstate";
+				reg = <0x300 4>;
+				#power-domain-cells = <0>;
+				#reset-cells = <0>;
+				label = "ans";
+				apple,inherited-on;
+			};
+
+			ps_apcie_st: power-controller@410 {
+				compatible = "apple,t8142-pmgr-pwrstate",
+					     "apple,t8103-pmgr-pwrstate";
+				reg = <0x410 4>;
+				#power-domain-cells = <0>;
+				#reset-cells = <0>;
+				label = "apcie-st";
+				apple,inherited-on;
+				power-domains = <&ps_ans>;
+			};
+
+			ps_apcie_sys_st: power-controller@520 {
+				compatible = "apple,t8142-pmgr-pwrstate",
+					     "apple,t8103-pmgr-pwrstate";
+				reg = <0x520 4>;
+				#power-domain-cells = <0>;
+				#reset-cells = <0>;
+				label = "apcie-sys-st";
+				apple,inherited-on;
+				power-domains = <&ps_ans>, <&ps_apcie_st>;
+			};
+
+			ps_apcie_phy_sw: power-controller@560 {
+				compatible = "apple,t8142-pmgr-pwrstate",
+					     "apple,t8103-pmgr-pwrstate";
+				reg = <0x560 4>;
+				#power-domain-cells = <0>;
+				#reset-cells = <0>;
+				label = "apcie-phy-sw";
+				apple,inherited-on;
+				power-domains = <&ps_apcie_sys_st>;
+			};
 
 			soc_power_management_380700000_power_controller_2d8: power-controller@2d8 {
 				apple,always-on;
