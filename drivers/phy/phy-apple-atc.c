@@ -546,7 +546,8 @@ static int apple_atcphy_t8140_probe(struct udevice *dev)
 /*
  * Initial J704 USB2 host path. Registers and sequencing follow the T8142
  * Linux driver. Firmware/HPM retains Type-C power policy; no SuperSpeed or
- * alternate-mode ownership is claimed here. Never take over the UART port.
+ * alternate-mode ownership is claimed here. All three external ports use
+ * this USB2 host path, including the port used for UART during bring-up.
  */
 static int apple_atcphy_t8142_probe(struct udevice *dev)
 {
@@ -560,7 +561,8 @@ static int apple_atcphy_t8142_probe(struct udevice *dev)
 	core = dev_read_addr_size_name(dev, "core", &core_size);
 	pipe = dev_read_addr_size_name(dev, "pipehandler", &pipe_size);
 	usb2 = dev_read_addr_size_name(dev, "usb2phy", &usb2_size);
-	if ((core != 0x40b000000ULL && core != 0x41b000000ULL) ||
+	if ((core != 0x403000000ULL && core != 0x40b000000ULL &&
+	     core != 0x41b000000ULL) ||
 	    pipe != core - 0x57c000 || usb2 != core - 0x570000 ||
 	    core_size != 0x4c000 || pipe_size != 0x4000 || usb2_size != 0x4000)
 		return -EINVAL;
