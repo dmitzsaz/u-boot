@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 /*
- * J704 audio coprocessor (AOP) and the 3.5 mm jack codec, hardware-verified
+ * J704 audio coprocessor, headphone jack and six internal amplifiers, verified
  * on 2026-10-31/11-01 (RTKit boot, setup-port handshake, every AOP audio EPIC
  * service announced, CS42L84 identified, headphone insertion detected).
  *
@@ -13,8 +13,8 @@
  *   for ACTUAL == 0, so those domains are firmware-owned: the Linux pwrstate
  *   driver would pin them on with AUTO_ENABLE.
  *
- * The AOP audio child and the jack card are added separately once playback
- * through the jack is verified.
+ * The AOP owns the serializers. The host uses base-ns ADMAC TX2/RX2 for
+ * the jack and TX0/RX0 for six playback and twelve V/I sense channels.
  */
 
 &{/soc} {
@@ -114,6 +114,17 @@
 			label = "audio_base_ns_a";
 			power-domains = <&ps_audio_p>;
 		};
+
+		ps_audio_mca2_m: power-controller@118 {
+			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+			reg = <0x118 4>;
+			#power-domain-cells = <0>;
+			#reset-cells = <0>;
+			label = "audio_mca2_m";
+			power-domains = <&ps_audio_p>;
+			/* cout powers MCA2 through the AOP, not through Linux votes. */
+			apple,firmware-owned;
+		};
 	};
 
 	aop_dart: iommu@390fc0000 {
@@ -156,6 +167,20 @@
 		iommus = <&aop_dart 0>;
 		apple,dma-range = <0x110 0x0 0x10 0x0>;
 		power-domains = <&ps_aop_cpu>;
+
+		aop_audio: audio {
+			compatible = "apple,t8142-aop-audio", "apple,t8140-aop-audio";
+			iommus = <&aop_dart 9>;
+			apple,dma-range = <0x100 0x40000000 0x0 0xffff0000>;
+			dmas = <&admac_base_ns 4>, <&admac_base_ns 5>,
+			       <&admac_base_ns 0>, <&admac_base_ns 1>;
+			dma-names = "cout", "cin", "spkr", "sense";
+			power-domains = <&ps_audio_mca2_m>;
+			power-domain-names = "mca1";
+			apple,chassis-name = "J704";
+			apple,machine-kind = "MacBook Pro";
+			#sound-dai-cells = <1>;
+		};
 	};
 
 	admac_base_ns: dma-controller@393800000 {
@@ -199,6 +224,90 @@
 			sound-name-prefix = "Jack";
 		};
 	};
+
+	i2c@3a501c000 {
+		compatible = "apple,t8142-i2c", "apple,i2c";
+		reg = <0x3 0xa501c000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <0 1250 4>;
+		power-domains = <&ps_i2c3>;
+		clocks = <&clock_ref>;
+		clock-frequency = <100000>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		spk_lw1: codec@38 {
+			compatible = "ti,sn012776", "ti,tas2764";
+			reg = <0x38>;
+			SDZ-supply = <&speaker_sdz>;
+			apple,sdz-group-fail-closed;
+			#sound-dai-cells = <0>;
+			sound-name-prefix = "Left Woofer 1";
+			interrupts-extended = <&soc_pinctrl_39a000000 150 8>;
+			ti,imon-slot-no = <0>;
+			ti,vmon-slot-no = <2>;
+		};
+
+		spk_lw2: codec@39 {
+			compatible = "ti,sn012776", "ti,tas2764";
+			reg = <0x39>;
+			SDZ-supply = <&speaker_sdz>;
+			apple,sdz-group-fail-closed;
+			#sound-dai-cells = <0>;
+			sound-name-prefix = "Left Woofer 2";
+			interrupts-extended = <&soc_pinctrl_39a000000 150 8>;
+			ti,imon-slot-no = <8>;
+			ti,vmon-slot-no = <10>;
+		};
+
+		spk_lt: codec@3a {
+			compatible = "ti,sn012776", "ti,tas2764";
+			reg = <0x3a>;
+			SDZ-supply = <&speaker_sdz>;
+			apple,sdz-group-fail-closed;
+			#sound-dai-cells = <0>;
+			sound-name-prefix = "Left Tweeter";
+			interrupts-extended = <&soc_pinctrl_39a000000 150 8>;
+			ti,imon-slot-no = <16>;
+			ti,vmon-slot-no = <18>;
+		};
+
+		spk_rw1: codec@3b {
+			compatible = "ti,sn012776", "ti,tas2764";
+			reg = <0x3b>;
+			SDZ-supply = <&speaker_sdz>;
+			apple,sdz-group-fail-closed;
+			#sound-dai-cells = <0>;
+			sound-name-prefix = "Right Woofer 1";
+			interrupts-extended = <&soc_pinctrl_39a000000 150 8>;
+			ti,imon-slot-no = <4>;
+			ti,vmon-slot-no = <6>;
+		};
+
+		spk_rw2: codec@3c {
+			compatible = "ti,sn012776", "ti,tas2764";
+			reg = <0x3c>;
+			SDZ-supply = <&speaker_sdz>;
+			apple,sdz-group-fail-closed;
+			#sound-dai-cells = <0>;
+			sound-name-prefix = "Right Woofer 2";
+			interrupts-extended = <&soc_pinctrl_39a000000 150 8>;
+			ti,imon-slot-no = <12>;
+			ti,vmon-slot-no = <14>;
+		};
+
+		spk_rt: codec@3d {
+			compatible = "ti,sn012776", "ti,tas2764";
+			reg = <0x3d>;
+			SDZ-supply = <&speaker_sdz>;
+			apple,sdz-group-fail-closed;
+			#sound-dai-cells = <0>;
+			sound-name-prefix = "Right Tweeter";
+			interrupts-extended = <&soc_pinctrl_39a000000 150 8>;
+			ti,imon-slot-no = <20>;
+			ti,vmon-slot-no = <22>;
+		};
+	};
 };
 
 &{/soc/power-management@380700000} {
@@ -211,5 +320,68 @@
 		#power-domain-cells = <0>;
 		#reset-cells = <0>;
 		label = "i2c1";
+	};
+
+	ps_i2c3: power-controller@360 {
+		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x360 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "i2c3";
+	};
+};
+
+
+&{/} {
+	speaker_sdz: regulator-sn012776-sdz {
+		compatible = "regulator-fixed";
+		regulator-name = "sn012776-sdz";
+		gpios = <&soc_pinctrl_39a000000 151 0>;
+		enable-active-high;
+	};
+
+	sound-jack {
+		compatible = "apple,j704-macaudio", "apple,macaudio";
+		model = "MacBook Pro J704 Jack";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		dai-link@0 {
+			reg = <0>;
+			link-name = "Headphone Jack";
+
+			cpu {
+				sound-dai = <&aop_audio 0>;
+			};
+
+			codec {
+				sound-dai = <&jack_codec>;
+			};
+		};
+	};
+
+	sound-speakers {
+		compatible = "apple,j704-macaudio-speakers", "apple,macaudio";
+		model = "MacBook Pro J704";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		dai-link@0 {
+			reg = <0>;
+			link-name = "Speakers";
+			dai-tdm-idle-mode-0 = "zero";
+			dai-tdm-idle-mode-1 = "zero";
+			dai-tdm-slot-tx-idle-mask-0 = <0xf0f0f0>;
+			dai-tdm-slot-tx-idle-mask-1 = <0x0f0f0f>;
+
+			cpu {
+				sound-dai = <&aop_audio 5>;
+			};
+
+			codec {
+				sound-dai = <&spk_lw1>, <&spk_rw1>, <&spk_lw2>, <&spk_rw2>,
+					    <&spk_lt>, <&spk_rt>;
+			};
+		};
 	};
 };
