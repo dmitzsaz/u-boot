@@ -151,11 +151,25 @@ static int apple_nvme_retain_dma(void *buffer, size_t size)
 		return -EINVAL;
 	start = ALIGN_DOWN(addr, SZ_16K);
 	end = ALIGN(addr + size, SZ_16K);
-	for (i = 0; i < ans_boot.count; i++) {
-		if (ans_boot.ranges[i].start != start)
+	for (i = 0; i < ans_boot.count;) {
+		u64 range_start = ans_boot.ranges[i].start;
+		u64 range_end = range_start + ans_boot.ranges[i].size;
+
+		if (end < range_start || start > range_end) {
+			i++;
 			continue;
-		ans_boot.ranges[i].size = max(ans_boot.ranges[i].size, end - start);
-		return 0;
+		}
+		/* Distinct allocations can share a 16-KiB reservation page.
+		 * Keep their union: separate overlapping reserved-memory nodes
+		 * trigger the kernel's overlap warning during handoff.
+		 */
+		start = min(start, range_start);
+		end = max(end, range_end);
+		memmove(&ans_boot.ranges[i], &ans_boot.ranges[i + 1],
+			(ans_boot.count - i - 1) * sizeof(ans_boot.ranges[0]));
+		ans_boot.count--;
+		/* Expansion can bridge a range already visited. */
+		i = 0;
 	}
 	if (ans_boot.count == ANS_BOOT_RANGES)
 		return -EINVAL;
