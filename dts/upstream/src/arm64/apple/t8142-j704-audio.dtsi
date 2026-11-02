@@ -15,6 +15,14 @@
  *
  * The AOP owns the serializers. The host uses base-ns ADMAC TX2/RX2 for
  * the jack and TX0/RX0 for six playback and twelve V/I sense channels.
+ *
+ * The three-microphone array (hpai, packed float32 at 48 kHz) comes back
+ * over leap-s ADMAC RX0. Like the setup port, that ADMAC is reached through
+ * its proxy aperture (direct block + 0x40000000, the ADT's
+ * admac-leap-s-rx-0-proxy reg); its dart-aop stream 11 root is inherited
+ * empty and the host uses the ADT vm-base-11 window. The AOP keeps the LEAP
+ * domains (LEAP_A/C on, LEAP-S A in auto-PM, RX0 on), so they are
+ * firmware-owned here as well.
  */
 
 &{/soc} {
@@ -106,6 +114,16 @@
 			apple,firmware-owned;
 		};
 
+		ps_audio_leap_a: power-controller@e0 {
+			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+			reg = <0xe0 4>;
+			#power-domain-cells = <0>;
+			#reset-cells = <0>;
+			label = "audio_leap_a";
+			power-domains = <&ps_audio_fr>;
+			apple,firmware-owned;
+		};
+
 		ps_audio_base_ns_a: power-controller@f8 {
 			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
 			reg = <0xf8 4>;
@@ -123,6 +141,26 @@
 			label = "audio_mca2_m";
 			power-domains = <&ps_audio_p>;
 			/* cout powers MCA2 through the AOP, not through Linux votes. */
+			apple,firmware-owned;
+		};
+
+		ps_audio_leap_c: power-controller@138 {
+			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+			reg = <0x138 4>;
+			#power-domain-cells = <0>;
+			#reset-cells = <0>;
+			label = "audio_leap_c";
+			power-domains = <&ps_audio_leap_a>;
+			apple,firmware-owned;
+		};
+
+		ps_audio_leap_s_a: power-controller@140 {
+			compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+			reg = <0x140 4>;
+			#power-domain-cells = <0>;
+			#reset-cells = <0>;
+			label = "audio_leap_s_a";
+			power-domains = <&ps_audio_leap_c>;
 			apple,firmware-owned;
 		};
 	};
@@ -172,9 +210,14 @@
 			compatible = "apple,t8142-aop-audio", "apple,t8140-aop-audio";
 			iommus = <&aop_dart 9>;
 			apple,dma-range = <0x100 0x40000000 0x0 0xffff0000>;
+			/*
+			 * hpai is leap-s rx-0: odd ADMAC channels are receive, so
+			 * the ADT's rx-N is Linux channel 2N+1.
+			 */
 			dmas = <&admac_base_ns 4>, <&admac_base_ns 5>,
-			       <&admac_base_ns 0>, <&admac_base_ns 1>;
-			dma-names = "cout", "cin", "spkr", "sense";
+			       <&admac_base_ns 0>, <&admac_base_ns 1>,
+			       <&admac_leap_s 1>;
+			dma-names = "cout", "cin", "spkr", "sense", "hpai";
 			power-domains = <&ps_audio_mca2_m>;
 			power-domain-names = "mca1";
 			apple,chassis-name = "J704";
@@ -192,6 +235,21 @@
 		iommus = <&aop_dart 8>;
 		apple,dma-range = <0x110 0x0 0x0 0x10000000>;
 		power-domains = <&ps_audio_base_ns_a>;
+	};
+
+	admac_leap_s: dma-controller@3d3200000 {
+		compatible = "apple,t8140-admac";
+		reg = <0x3 0xd3200000 0x0 0x34000>;
+		dma-channels = <9>;
+		interrupts-extended = <&aic 0 551 4>, <0>, <0>, <0>;
+		#dma-cells = <1>;
+		iommus = <&aop_dart 11>;
+		apple,dma-range = <0x100 0x40000000 0x0 0xffff0000>;
+		power-domains = <&ps_audio_leap_s_a>;
+		/*
+		 * No resets: the AOP firmware owns the LEAP fabric, and resetting
+		 * this ADMAC under it leaves its channel registers dead.
+		 */
 	};
 
 	pinctrl_nub: pinctrl@3881f0000 {
