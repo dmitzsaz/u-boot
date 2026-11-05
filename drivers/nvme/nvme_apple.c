@@ -148,9 +148,21 @@ static const struct apple_nvme_hw apple_nvme_t6040_hw = {
 	.max_ns_id = 1,
 };
 
+/*
+ * T8142 (M5): the same controller and handover as T6040.  iBoot leaves the
+ * ANS running with the controller disabled and before the OS-side RTKit
+ * handshake. The DT register window selects the linear queue aperture.
+ */
+static const struct apple_nvme_hw apple_nvme_t8142_hw = {
+	.post_m4 = true,
+	.wake_disabled = true,
+	.max_ns_id = 1,
+};
+
 struct apple_nvme_priv {
 	struct nvme_dev ndev;
 	const struct apple_nvme_hw *hw;
+	bool lsq_in_nvmmu;
 	void *base;		/* NVMe registers */
 	void *nvmmu;		/* NVMMU registers */
 	void *asc;		/* ASC registers */
@@ -167,7 +179,7 @@ struct apple_nvme_priv {
 /* The block holding LINEAR_SQ_CTRL and the linear SQ doorbells */
 static void __iomem *apple_nvme_lsq(struct apple_nvme_priv *priv)
 {
-	return priv->hw->lsq_in_nvmmu ? priv->nvmmu : priv->base;
+	return priv->lsq_in_nvmmu ? priv->nvmmu : priv->base;
 }
 
 /* A queue's TCB array, allocated once; NVMMU wants it 16 KiB aligned. */
@@ -525,7 +537,7 @@ static int apple_nvme_setup_post_m4(struct apple_nvme_priv *priv)
 	struct udevice *dev = priv->ndev.udev;
 	u32 ioqa;
 
-	if (!priv->hw->lsq_in_nvmmu)
+	if (!priv->lsq_in_nvmmu)
 		writel(ANS_LINEAR_SQ_CTRL_EN, priv->base + ANS_LINEAR_SQ_CTRL);
 	if (!(readl(apple_nvme_lsq(priv) + ANS_LINEAR_SQ_CTRL) &
 	      ANS_LINEAR_SQ_CTRL_EN)) {
@@ -809,6 +821,7 @@ static int apple_nvme_probe(struct udevice *dev)
 {
 	struct apple_nvme_priv *priv = dev_get_priv(dev);
 	fdt_addr_t addr;
+	fdt_size_t nvme_size = 0;
 	int ret;
 
 	if (apple_nvme_adopt_failed)
@@ -817,7 +830,10 @@ static int apple_nvme_probe(struct udevice *dev)
 	priv->hw = (const struct apple_nvme_hw *)dev_get_driver_data(dev);
 
 	if (priv->hw->post_m4) {
-		priv->base = dev_read_addr_name_ptr(dev, "nvme");
+		addr = dev_read_addr_size_name(dev, "nvme", &nvme_size);
+		if (addr == FDT_ADDR_T_NONE || !nvme_size)
+			return -EINVAL;
+		priv->base = map_sysmem(addr, nvme_size);
 		priv->asc = dev_read_addr_name_ptr(dev, "ans");
 		priv->nvmmu = dev_read_addr_name_ptr(dev, "nvmmu");
 		if (!priv->base || !priv->asc || !priv->nvmmu)
@@ -833,6 +849,9 @@ static int apple_nvme_probe(struct udevice *dev)
 		priv->asc = map_sysmem(addr, 0);
 		priv->nvmmu = priv->base;
 	}
+	/* 26.x firmware ends the NVMe window before the linear doorbells. */
+	priv->lsq_in_nvmmu = priv->hw->lsq_in_nvmmu ||
+		(priv->hw->post_m4 && nvme_size < ANS_IOSQ_DB + sizeof(u32));
 	priv->ndev.bar = priv->base;
 	priv->ndev.udev = dev;
 
@@ -924,6 +943,8 @@ static const struct udevice_id apple_nvme_ids[] = {
 	  .data = (ulong)&apple_nvme_t8103_hw },
 	{ .compatible = "apple,t8132-nvme-ans2",
 	  .data = (ulong)&apple_nvme_t8132_hw },
+	{ .compatible = "apple,t8142-nvme-ans2",
+	  .data = (ulong)&apple_nvme_t8142_hw },
 	{ .compatible = "apple,nvme-ans2",
 	  .data = (ulong)&apple_nvme_t8103_hw },
 	{ /* sentinel */ }
