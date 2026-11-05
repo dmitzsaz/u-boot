@@ -16,6 +16,9 @@
 /* Maximum number of elements in a JSON array */
 #define MAX_ARRAY_SIZE 256
 
+/* Maximum nesting of JSON objects, which bounds the parser's recursion */
+#define MAX_OBJECT_DEPTH 16
+
 /* JSON token types */
 enum json_token_type {
 	JSONT_EOF = 0,
@@ -42,6 +45,7 @@ enum json_token_type {
  * @tok_end: Pointer to the end of the current token
  * @fdt: Flattened Device Tree buffer being constructed
  * @fdt_size: Size of the FDT buffer in bytes
+ * @depth: Number of objects currently being parsed
  */
 struct json_parser {
 	const char *json;
@@ -51,6 +55,7 @@ struct json_parser {
 	const char *tok_end;
 	void *fdt;
 	int fdt_size;
+	int depth;
 };
 
 /* Increment position in JSON string */
@@ -238,8 +243,12 @@ static enum json_token_type next_token(struct json_parser *ctx)
 			INC();
 		}
 		ctx->tok_end = ctx->pos;
-		if (*ctx->pos == '"')
-			INC();
+		/* The input ended inside the string */
+		if (*ctx->pos != '"') {
+			SET(JSONT_ERROR);
+			break;
+		}
+		INC();
 		SET(JSONT_STRING);
 		break;
 	}
@@ -538,7 +547,7 @@ static int parse_value(struct json_parser *ctx, const char *prop_name)
  * @node_name: Name for the device tree node (NULL for root)
  * Return: 0 on success, negative error code on failure
  */
-static int parse_object(struct json_parser *ctx, const char *node_name)
+static int __parse_object(struct json_parser *ctx, const char *node_name)
 {
 	int ret;
 
@@ -610,6 +619,20 @@ static int parse_object(struct json_parser *ctx, const char *node_name)
 	}
 
 	return 0;
+}
+
+static int parse_object(struct json_parser *ctx, const char *node_name)
+{
+	int ret;
+
+	/* Untrusted input (e.g. LUKS2 metadata) must not exhaust the stack */
+	if (ctx->depth >= MAX_OBJECT_DEPTH)
+		return -E2BIG;
+	ctx->depth++;
+	ret = __parse_object(ctx, node_name);
+	ctx->depth--;
+
+	return ret;
 }
 
 /**
