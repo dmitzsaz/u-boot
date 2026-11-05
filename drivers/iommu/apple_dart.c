@@ -97,6 +97,8 @@ struct apple_dart_priv {
 	u32 tcr_translate_enable;
 	u32 tcr_four_level;
 	u32 tcr_bypass;
+	/* Bypass was set but its TCR bits do not read back; see apple_dart_map(). */
+	bool bypass_unverified;
 	u64 table_valid;
 	int ttbr_base;
 	u32 ttbr_valid;
@@ -132,6 +134,8 @@ static void apple_dart_t8110_flush_tlb(struct apple_dart_priv *priv)
 	}
 }
 
+static int apple_dart_setup_tables(struct udevice *dev);
+
 static dma_addr_t apple_dart_map(struct udevice *dev, void *addr, size_t size)
 {
 	struct apple_dart_priv *priv = dev_get_priv(dev);
@@ -139,6 +143,13 @@ static dma_addr_t apple_dart_map(struct udevice *dev, void *addr, size_t size)
 	phys_size_t psize, off;
 	int i, idx;
 
+	if (priv->bypass && priv->bypass_unverified && !priv->retain_bypass) {
+		dev_dbg(dev, "bypass not verified, translating\n");
+		priv->bypass = 0;
+		priv->bypass_unverified = false;
+		if (apple_dart_setup_tables(dev))
+			return 0;
+	}
 	if (priv->bypass)
 		return (phys_addr_t)addr;
 
@@ -193,9 +204,6 @@ static struct iommu_ops apple_dart_ops = {
 static int apple_dart_probe(struct udevice *dev)
 {
 	struct apple_dart_priv *priv = dev_get_priv(dev);
-	dma_addr_t addr;
-	phys_addr_t l2;
-	int ntte, nl1, nl2;
 	int ret, sid, i;
 	u32 params2, params3, params4;
 
@@ -285,15 +293,33 @@ static int apple_dart_probe(struct udevice *dev)
 			writel(priv->tcr_bypass,
 			       priv->base + DART_TCR(priv, sid));
 		}
-		if ((readl(priv->base + DART_TCR(priv, 0)) & priv->tcr_bypass) ==
-		    priv->tcr_bypass) {
-			priv->bypass = 1;
-			return 0;
-		}
-		for (sid = 0; sid < priv->nsid; sid++)
-			writel(0, priv->base + DART_TCR(priv, sid));
-		dev_dbg(dev, "bypass not available, translating\n");
+		priv->bypass = 1;
+		/*
+		 * On some DARTs the bypass bits do not read back. A firmware
+		 * client that addresses its buffers physically (the T8142 MTP)
+		 * still works through them, while a device U-Boot maps for DMA
+		 * (the T8142 PCIe SD reader) does not, so switch to page
+		 * tables only when something is mapped.
+		 */
+		priv->bypass_unverified =
+			(readl(priv->base + DART_TCR(priv, 0)) & priv->tcr_bypass) !=
+			priv->tcr_bypass;
+		return 0;
 	}
+
+	return apple_dart_setup_tables(dev);
+}
+
+static int apple_dart_setup_tables(struct udevice *dev)
+{
+	struct apple_dart_priv *priv = dev_get_priv(dev);
+	dma_addr_t addr;
+	phys_addr_t l2;
+	int ntte, nl1, nl2;
+	int sid, i;
+
+	for (sid = 0; sid < priv->nsid; sid++)
+		writel(0, priv->base + DART_TCR(priv, sid));
 
 	ntte = DIV_ROUND_UP(priv->dvaend, DART_PAGE_SIZE);
 	nl2 = DIV_ROUND_UP(ntte, DART_PAGE_SIZE / sizeof(u64));
