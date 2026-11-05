@@ -984,6 +984,22 @@ static struct mm_region t8142_mem_map[] = {
 		.attrs = PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) |
 			 PTE_BLOCK_NON_SHARE | PTE_BLOCK_PXN | PTE_BLOCK_UXN
 	}, {
+		/* APCIE ECAM (the DT's config reg) */
+		.virt = 0x1cb0000000,
+		.phys = 0x1cb0000000,
+		.size = SZ_256M,
+		.attrs = PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) |
+			 PTE_BLOCK_NON_SHARE |
+			 PTE_BLOCK_PXN | PTE_BLOCK_UXN
+	}, {
+		/* APCIE endpoint windows (both DT ranges) */
+		.virt = 0xb80000000,
+		.phys = 0xb80000000,
+		.size = SZ_1G + SZ_512M,
+		.attrs = PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRE) |
+			 PTE_BLOCK_INNER_SHARE |
+			 PTE_BLOCK_PXN | PTE_BLOCK_UXN
+	}, {
 		.virt = 0x10000000000,
 		.phys = 0x10000000000,
 		.size = 16UL * SZ_1G,
