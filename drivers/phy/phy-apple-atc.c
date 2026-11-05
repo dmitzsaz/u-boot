@@ -67,8 +67,10 @@
 #define  PIPEHANDLER_OVERRIDE_VAL_RXDETECT0 BIT(1)
 #define  PIPEHANDLER_OVERRIDE_VAL_RXDETECT1 BIT(2)
 #define PIPEHANDLER_MUX_CTRL		0x0c
-#define  PIPEHANDLER_MUX_CTRL_CLK	GENMASK(5, 3)
-#define  PIPEHANDLER_MUX_CTRL_DATA	GENMASK(2, 0)
+#define  PIPEHANDLER_MUX_CTRL_CLK_T8103	GENMASK(5, 3)
+#define  PIPEHANDLER_MUX_CTRL_DATA_T8103 GENMASK(2, 0)
+#define  PIPEHANDLER_MUX_CTRL_CLK_T8142	GENMASK(6, 4)
+#define  PIPEHANDLER_MUX_CTRL_DATA_T8142 GENMASK(1, 0)
 #define  PIPEHANDLER_MUX_CTRL_CLK_OFF	0
 #define  PIPEHANDLER_MUX_CTRL_CLK_DUMMY	4
 #define  PIPEHANDLER_MUX_CTRL_DATA_DUMMY 2
@@ -98,8 +100,39 @@
 #define  USB2PHY_MISCTUNE_APBCLK_GATE_OFF BIT(29)
 #define  USB2PHY_MISCTUNE_REFCLK_GATE_OFF BIT(30)
 
+/**
+ * struct apple_atcphy_hw - SoC differences of the USB2 host path
+ *
+ * @pipe_mux_clk: Clock select field of PIPEHANDLER_MUX_CTRL
+ * @pipe_mux_data: Data select field of PIPEHANDLER_MUX_CTRL
+ * @eusb2_defaults: The eUSB2 repeater ("usb2phy-reg") needs its defaults
+ *	after every PHY reset, and time to settle before the link starts
+ * @park_dummy: Leave the PIPE on the dummy PHY when stopping. Linux starts
+ *	USB3 with a PIPE lock handshake that this PHY acknowledges only while
+ *	the dummy PHY is enabled (park_dummy_phy in Linux).
+ */
+struct apple_atcphy_hw {
+	u32 pipe_mux_clk;
+	u32 pipe_mux_data;
+	bool eusb2_defaults;
+	bool park_dummy;
+};
+
+static const struct apple_atcphy_hw apple_atcphy_t8140_hw = {
+	.pipe_mux_clk = PIPEHANDLER_MUX_CTRL_CLK_T8103,
+	.pipe_mux_data = PIPEHANDLER_MUX_CTRL_DATA_T8103,
+	.eusb2_defaults = true,
+};
+
+static const struct apple_atcphy_hw apple_atcphy_t8142_hw = {
+	.pipe_mux_clk = PIPEHANDLER_MUX_CTRL_CLK_T8142,
+	.pipe_mux_data = PIPEHANDLER_MUX_CTRL_DATA_T8142,
+	.park_dummy = true,
+};
+
 struct apple_atcphy_priv {
-	bool usb2_only;		/* A18 Pro: USB2 through a fixed hub */
+	const struct apple_atcphy_hw *hw;
+	bool usb2_only;		/* Bring-up of the USB2 host path in U-Boot */
 	void __iomem *core;
 	void __iomem *pipehandler;
 	void __iomem *usb2phy;
@@ -213,9 +246,13 @@ static int atcphy_usb2_power_on(struct udevice *dev)
 	clear32(priv->usb2phy + USB2PHY_MISCTUNE, USB2PHY_MISCTUNE_REFCLK_GATE_OFF);
 
 	/* Let the eUSB2 repeater settle between reset release and link start. */
-	mdelay(5);
+	if (priv->hw->eusb2_defaults)
+		mdelay(5);
 
 	writel(USB2PHY_USBCTL_RUN, priv->usb2phy + USB2PHY_USBCTL);
+
+	if (!priv->hw->eusb2_defaults)
+		return 0;
 
 	/* Per-device eUSB2 defaults; the resets above cleared them. */
 	ret = atcphy_apply_tunable(dev, priv->usb2phy_reg,
@@ -258,6 +295,25 @@ static int atcphy_power_off(struct udevice *dev)
 	return 0;
 }
 
+/* Set a PIPEHANDLER_MUX_CTRL field whose position depends on the SoC */
+static void atcphy_pipe_mux(struct apple_atcphy_priv *priv, u32 mask, u32 val)
+{
+	mask32(priv->pipehandler + PIPEHANDLER_MUX_CTRL, mask,
+	       (val << __ffs(mask)) & mask);
+}
+
+static void atcphy_pipe_clk(struct apple_atcphy_priv *priv, u32 clk)
+{
+	atcphy_pipe_mux(priv, priv->hw->pipe_mux_clk, clk);
+}
+
+static void atcphy_pipe_data(struct apple_atcphy_priv *priv, u32 data)
+{
+	atcphy_pipe_mux(priv, priv->hw->pipe_mux_data, data);
+}
+
+static void atcphy_setup_pipehandler_dummy(struct apple_atcphy_priv *priv);
+
 static int atcphy_stop(struct udevice *dev)
 {
 	struct apple_atcphy_priv *priv = dev_get_priv(dev);
@@ -266,11 +322,14 @@ static int atcphy_stop(struct udevice *dev)
 	priv->configured = false;
 	atcphy_dwc3_reset_assert(priv);
 	atcphy_usb2_power_off(priv);
-	mask32(priv->pipehandler + PIPEHANDLER_MUX_CTRL,
-	       PIPEHANDLER_MUX_CTRL_CLK,
-	       FIELD_PREP(PIPEHANDLER_MUX_CTRL_CLK, PIPEHANDLER_MUX_CTRL_CLK_OFF));
-	clear32(priv->pipehandler + PIPEHANDLER_NONSELECTED_OVERRIDE,
-		PIPEHANDLER_DUMMY_PHY_EN);
+	if (priv->hw->park_dummy) {
+		/* dwc3 is held in reset: no lock handshake to wait for */
+		atcphy_setup_pipehandler_dummy(priv);
+	} else {
+		atcphy_pipe_clk(priv, PIPEHANDLER_MUX_CTRL_CLK_OFF);
+		clear32(priv->pipehandler + PIPEHANDLER_NONSELECTED_OVERRIDE,
+			PIPEHANDLER_DUMMY_PHY_EN);
+	}
 
 	return atcphy_power_off(dev);
 }
@@ -287,18 +346,21 @@ static int atcphy_startup_failed(struct udevice *dev, int ret)
 
 static void atcphy_setup_pipehandler_dummy(struct apple_atcphy_priv *priv)
 {
-	void __iomem *mux = priv->pipehandler + PIPEHANDLER_MUX_CTRL;
+	/* A parked PIPE must not detect a SuperSpeed link (as in Linux) */
+	if (priv->hw->park_dummy) {
+		clear32(priv->pipehandler + PIPEHANDLER_OVERRIDE_VALUES,
+			PIPEHANDLER_OVERRIDE_VAL_RXDETECT0 |
+			PIPEHANDLER_OVERRIDE_VAL_RXDETECT1);
+		set32(priv->pipehandler + PIPEHANDLER_OVERRIDE,
+		      PIPEHANDLER_OVERRIDE_RXVALID |
+		      PIPEHANDLER_OVERRIDE_RXDETECT);
+	}
 
-	mask32(mux, PIPEHANDLER_MUX_CTRL_CLK,
-	       FIELD_PREP(PIPEHANDLER_MUX_CTRL_CLK, PIPEHANDLER_MUX_CTRL_CLK_OFF));
+	atcphy_pipe_clk(priv, PIPEHANDLER_MUX_CTRL_CLK_OFF);
 	udelay(10);
-	mask32(mux, PIPEHANDLER_MUX_CTRL_DATA,
-	       FIELD_PREP(PIPEHANDLER_MUX_CTRL_DATA,
-			  PIPEHANDLER_MUX_CTRL_DATA_DUMMY));
+	atcphy_pipe_data(priv, PIPEHANDLER_MUX_CTRL_DATA_DUMMY);
 	udelay(10);
-	mask32(mux, PIPEHANDLER_MUX_CTRL_CLK,
-	       FIELD_PREP(PIPEHANDLER_MUX_CTRL_CLK,
-			  PIPEHANDLER_MUX_CTRL_CLK_DUMMY));
+	atcphy_pipe_clk(priv, PIPEHANDLER_MUX_CTRL_CLK_DUMMY);
 	udelay(10);
 
 	/* The dwc3 core does not finish initialising without the dummy PHY. */
@@ -481,25 +543,32 @@ static const struct reset_ops apple_atcphy_reset_ops = {
 };
 
 /*
- * The A18 Pro's USB-C port reaches dwc3 only as USB2, through a hub on the
- * board; nothing else brings this PHY up before U-Boot runs.  Reset whatever
- * the boot firmware left, then establish USB2 host mode while dwc3 is still
- * held in reset.  SuperSpeed, DisplayPort and the Type-C controller are left
- * to the OS.
+ * On the A18 Pro (T8140) and M5 (T8142) nothing brings this PHY up for
+ * USB2 before U-Boot runs; the A18 Pro's port even reaches dwc3 only as
+ * USB2, through a hub on the board. Reset whatever the boot firmware left,
+ * then establish USB2 host mode while dwc3 is still held in reset.
+ * SuperSpeed, DisplayPort and the Type-C controller are left to the OS.
  */
-static int apple_atcphy_t8140_probe(struct udevice *dev)
+static int apple_atcphy_usb2_host_probe(struct udevice *dev,
+					const struct apple_atcphy_hw *hw)
 {
 	struct apple_atcphy_priv *priv = dev_get_priv(dev);
 	int ret;
 
+	priv->hw = hw;
 	priv->core = dev_read_addr_name_ptr(dev, "core");
 	priv->pipehandler = dev_read_addr_name_ptr(dev, "pipehandler");
 	priv->usb2phy = dev_read_addr_name_ptr(dev, "usb2phy");
-	priv->usb2phy_reg = dev_read_addr_size_name_ptr(dev, "usb2phy-reg",
-							&priv->usb2phy_reg_size);
-	if (!priv->core || !priv->pipehandler || !priv->usb2phy ||
-	    !priv->usb2phy_reg || priv->usb2phy_reg_size < sizeof(u32))
+	if (!priv->core || !priv->pipehandler || !priv->usb2phy)
 		return -EINVAL;
+	if (hw->eusb2_defaults) {
+		priv->usb2phy_reg =
+			dev_read_addr_size_name_ptr(dev, "usb2phy-reg",
+						    &priv->usb2phy_reg_size);
+		if (!priv->usb2phy_reg ||
+		    priv->usb2phy_reg_size < sizeof(u32))
+			return -EINVAL;
+	}
 
 	priv->powered = true;
 	ret = atcphy_stop(dev);
@@ -518,11 +587,13 @@ static int apple_atcphy_t8140_probe(struct udevice *dev)
 static int apple_atcphy_reset_probe(struct udevice *dev)
 {
 	struct apple_atcphy_priv *priv = dev_get_priv(dev);
+	const struct apple_atcphy_hw *hw;
 	struct udevice *child;
 	int ret;
 
-	if (device_is_compatible(dev, "apple,t8140-atcphy")) {
-		ret = apple_atcphy_t8140_probe(dev);
+	hw = (const struct apple_atcphy_hw *)dev_get_driver_data(dev);
+	if (hw) {
+		ret = apple_atcphy_usb2_host_probe(dev, hw);
 		if (ret)
 			return ret;
 	}
@@ -553,7 +624,10 @@ static const struct udevice_id apple_atcphy_ids[] = {
 	{ .compatible = "apple,t6000-atcphy" },
 	{ .compatible = "apple,t8103-atcphy" },
 	{ .compatible = "apple,t8122-atcphy" },
-	{ .compatible = "apple,t8140-atcphy" },
+	{ .compatible = "apple,t8140-atcphy",
+	  .data = (ulong)&apple_atcphy_t8140_hw },
+	{ .compatible = "apple,t8142-atcphy",
+	  .data = (ulong)&apple_atcphy_t8142_hw },
 	{ }
 };
 
