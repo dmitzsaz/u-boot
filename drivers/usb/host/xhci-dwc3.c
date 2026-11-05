@@ -230,6 +230,8 @@ static int xhci_dwc3_remove(struct udevice *dev)
 
 	/* Stop the controller while its PHYs, clocks and resets are still up. */
 	ret = xhci_deregister(dev);
+	if (ret)
+		return ret;
 
 	dwc3_shutdown_phy(dev, &plat->phys);
 
