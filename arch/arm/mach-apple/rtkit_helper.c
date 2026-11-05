@@ -256,11 +256,12 @@ static int rtkit_helper_probe(struct udevice *dev)
 	if (rtkit_helper_t8142_handoff(dev))
 		priv->dma_start = priv->dma_end = 0;
 
-	if (of_machine_is_compatible("apple,j614s") &&
-	    device_is_compatible(dev, "apple,t6041-rtk-helper-asc4")) {
+	if ((of_machine_is_compatible("apple,j614s") &&
+	     device_is_compatible(dev, "apple,t6041-rtk-helper-asc4")) ||
+	    rtkit_helper_t8142_handoff(dev)) {
 		ret = priv->dart ? apple_dart_retain_bypass(priv->dart) : -ENODEV;
 		if (ret) {
-			printf("J614s: MTP DART bypass unavailable (%d)\n", ret);
+			printf("MTP: DART bypass unavailable (%d)\n", ret);
 			return ret;
 		}
 	}
@@ -274,10 +275,15 @@ static int rtkit_helper_probe(struct udevice *dev)
 		goto err_stop;
 	}
 
-	/* Stable kernels do not service logging after the OS boundary. */
+	/*
+	 * The T8142 MTP firmware only reports its IOP on after every system
+	 * endpoint it announces has started, logging included, and it needs
+	 * the AP powered first. Stable J713/J614s kernels do not service
+	 * logging after the OS boundary, so those skip the logging endpoints.
+	 */
 	if (rtkit_helper_t8142_handoff(dev))
-		ret = apple_rtkit_boot_with_options(priv->rtk,
-			~(u32)(BIT(2) | BIT(3) | BIT(10)), APPLE_RTKIT_BOOT_AP_FIRST);
+		ret = apple_rtkit_boot_with_options(priv->rtk, ~(u32)0,
+						    APPLE_RTKIT_BOOT_AP_FIRST);
 	else if (rtkit_helper_j713_handoff(dev))
 		ret = apple_rtkit_boot_with_sys_ep_mask(priv->rtk,
 							~(u32)(BIT(2) | BIT(3) | BIT(10)));
