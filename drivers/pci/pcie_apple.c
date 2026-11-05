@@ -119,10 +119,24 @@
 #define   PORT_TUNSTAT_PERST_ACK_PEND	BIT(1)
 #define PORT_PREFMEM_ENABLE		0x00994
 
+/**
+ * struct reg_info - Port register layout and bring-up policy of a controller
+ *
+ * @phy_lane_ctl: PHY lane control register, 0 if none
+ * @port_refclk: Port reference clock register, 0 if none
+ * @port_perst: Port PERST# register
+ * @port_rid2sid: First RID2SID register; with @adopt only
+ * @max_rid2sid: Number of RID2SID registers, which are indexed by stream ID
+ * @adopt: The boot loader powers, clocks and trains the ports; U-Boot only
+ *	adopts them and leaves clocks and PERST# as they are
+ */
 struct reg_info {
 	u32 phy_lane_ctl;
 	u32 port_refclk;
 	u32 port_perst;
+	u32 port_rid2sid;
+	u32 max_rid2sid;
+	bool adopt;
 };
 
 const struct reg_info t8103_hw = {
@@ -132,11 +146,20 @@ const struct reg_info t8103_hw = {
 };
 
 #define PORT_T602X_PERST		0x082c
+#define PORT_T602X_RID2SID		0x3000
 
 const struct reg_info t602x_hw = {
 	.phy_lane_ctl = 0,
 	.port_refclk = 0,
 	.port_perst = PORT_T602X_PERST,
+};
+
+/* T8142 (M5): T602x port layout, ports trained by the boot loader */
+const struct reg_info t8142_hw = {
+	.port_perst = PORT_T602X_PERST,
+	.port_rid2sid = PORT_T602X_RID2SID,
+	.max_rid2sid = 19,
+	.adopt = true,
 };
 
 struct apple_pcie_priv {
@@ -242,6 +265,79 @@ static int apple_pcie_setup_refclk(struct apple_pcie_priv *pcie,
 	return 0;
 }
 
+/*
+ * Route the requester IDs of the port's bus to the streams the DT gives them
+ * in iommu-map. The table is indexed by stream ID. The map names bus numbers
+ * (as in Linux); the port's bus-range says which of them are behind it, and
+ * U-Boot numbers the buses in the same order.
+ */
+static void apple_pcie_setup_rid2sid(struct apple_pcie_priv *pcie,
+				     struct apple_pcie_port *port)
+{
+	u32 bus[2], map[4];
+	int i, j, count;
+
+	for (i = 0; i < pcie->hw->max_rid2sid; i++)
+		writel_relaxed(0, port->base + pcie->hw->port_rid2sid + 4 * i);
+
+	if (ofnode_read_u32_array(port->np, "bus-range", bus, 2)) {
+		dev_warn(pcie->dev, "port %d: no bus-range, no DMA streams\n",
+			 port->idx);
+		return;
+	}
+
+	count = dev_read_size(pcie->dev, "iommu-map") / sizeof(map);
+	for (i = 0; i < count; i++) {
+		if (dev_read_u32_index(pcie->dev, "iommu-map", 4 * i, &map[0]) ||
+		    dev_read_u32_index(pcie->dev, "iommu-map", 4 * i + 2,
+				       &map[2]) ||
+		    dev_read_u32_index(pcie->dev, "iommu-map", 4 * i + 3,
+				       &map[3]))
+			return;
+		for (j = 0; j < map[3]; j++) {
+			u32 rid = map[0] + j, sid = map[2] + j;
+
+			if (rid >> 8 < bus[0] || rid >> 8 > bus[1] ||
+			    sid >= pcie->hw->max_rid2sid)
+				continue;
+			writel_relaxed(PORT_RID2SID_VALID |
+				       (sid << PORT_RID2SID_SID_SHIFT) | rid,
+				       port->base + pcie->hw->port_rid2sid +
+				       4 * sid);
+		}
+	}
+}
+
+/*
+ * The boot loader powered the endpoint, ran the port's clock and PHY
+ * sequence and released PERST#. Asserting PERST# or redoing the clock
+ * setup here would undo that, so only finish what may be missing: the
+ * application clock and link training.
+ */
+static int apple_pcie_adopt_port(struct apple_pcie_priv *pcie,
+				 struct apple_pcie_port *port)
+{
+	u32 stat;
+
+	rmw_set(PORT_APPCLK_EN, port->base + PORT_APPCLK);
+	if (!(readl(port->base + PORT_STATUS) & PORT_STATUS_READY)) {
+		dev_info(pcie->dev, "port %d not prepared by the boot loader\n",
+			 port->idx);
+		return -ENODEV;
+	}
+
+	if (!(readl(port->base + PORT_LINKSTS) & PORT_LINKSTS_UP)) {
+		writel_relaxed(PORT_LTSSMCTL_START, port->base + PORT_LTSSMCTL);
+		readl_poll_sleep_timeout(port->base + PORT_LINKSTS, stat,
+					 stat & PORT_LINKSTS_UP, 100, 100000);
+	}
+
+	apple_pcie_setup_rid2sid(pcie, port);
+	list_add_tail(&port->entry, &pcie->ports);
+
+	return 0;
+}
+
 static int apple_pcie_setup_port(struct apple_pcie_priv *pcie, ofnode np)
 {
 	struct apple_pcie_port *port;
@@ -251,10 +347,6 @@ static int apple_pcie_setup_port(struct apple_pcie_priv *pcie, ofnode np)
 	u32 stat;
 	int ret;
 	char name[16];
-
-	ret = gpio_request_by_name_nodev(np, "reset-gpios", 0, &reset, 0);
-	if (ret)
-		return ret;
 
 	port = devm_kzalloc(pcie->dev, sizeof(*port), GFP_KERNEL);
 	if (!port)
@@ -268,7 +360,6 @@ static int apple_pcie_setup_port(struct apple_pcie_priv *pcie, ofnode np)
 	/* Use the first reg entry to work out the port index */
 	port->idx = PCI_DEV(pci_addr.phys_hi);
 	port->pcie = pcie;
-	port->reset = reset;
 	port->np = np;
 
 	snprintf(name, sizeof(name), "port%d", port->idx);
@@ -278,6 +369,14 @@ static int apple_pcie_setup_port(struct apple_pcie_priv *pcie, ofnode np)
 	if (addr == FDT_ADDR_T_NONE)
 		return -EINVAL;
 	port->base = map_sysmem(addr, 0);
+
+	if (pcie->hw->adopt)
+		return apple_pcie_adopt_port(pcie, port);
+
+	ret = gpio_request_by_name_nodev(np, "reset-gpios", 0, &reset, 0);
+	if (ret)
+		return ret;
+	port->reset = reset;
 
 	snprintf(name, sizeof(name), "phy%d", port->idx);
 	addr = dev_read_addr_name(pcie->dev, name);
@@ -374,6 +473,9 @@ static int apple_pcie_probe(struct udevice *dev)
 		if (ret)
 			continue;
 		ret = apple_pcie_setup_port(pcie, of_port);
+		/* An adopted port the boot loader did not prepare stays off */
+		if (ret == -ENODEV && pcie->hw->adopt)
+			continue;
 		if (ret) {
 			dev_err(pcie->dev, "Port %d setup fail: %d\n",
 				PCI_DEV(pci_addr.phys_hi), ret);
@@ -390,7 +492,8 @@ static int apple_pcie_remove(struct udevice *dev)
 	struct apple_pcie_port *port, *tmp;
 
 	list_for_each_entry_safe(port, tmp, &pcie->ports, entry) {
-		gpio_free_list_nodev(&port->reset, 1);
+		if (!pcie->hw->adopt)
+			gpio_free_list_nodev(&port->reset, 1);
 		free(port);
 	}
 
@@ -399,6 +502,7 @@ static int apple_pcie_remove(struct udevice *dev)
 
 static const struct udevice_id apple_pcie_of_match[] = {
 	{ .compatible = "apple,t6020-pcie", .data = (ulong)&t602x_hw },
+	{ .compatible = "apple,t8142-pcie", .data = (ulong)&t8142_hw },
 	{ .compatible = "apple,pcie", .data = (ulong)&t8103_hw },
 	{ /* sentinel */ }
 };
