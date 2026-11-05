@@ -12,11 +12,13 @@
 #include <malloc.h>
 #include <mapmem.h>
 #include <reset.h>
+#include <time.h>
 #include <linux/libfdt.h>
 
 #include <asm/io.h>
 #include <asm/arch/dart.h>
 #include <asm/arch/rtkit.h>
+#include <linux/delay.h>
 #include <linux/iopoll.h>
 #include <linux/sizes.h>
 
@@ -390,6 +392,36 @@ void apple_rtkit_helper_input_failed(struct udevice *dev)
 void apple_rtkit_helper_input_ready(struct udevice *dev)
 {
 	((struct rtkit_helper_priv *)dev_get_priv(dev))->input_ready = true;
+}
+
+/* Bytes waiting in the DockChannel input FIFO */
+#define DOCKCHANNEL_DATA_RX_COUNT	0x2c
+
+int apple_rtkit_helper_prepare_input(struct udevice *dev, void *data)
+{
+	ulong start;
+	int ret;
+
+	/* AP power ON can precede IOReport/buffer requests. Finish those
+	 * startup exchanges before Linux inherits a mailbox it will not poll.
+	 * Observe the first HID header without consuming any FIFO bytes. */
+	start = get_timer(0);
+	while (readl(data + DOCKCHANNEL_DATA_RX_COUNT) < 8 &&
+	       get_timer(start) < 2000) {
+		ret = apple_rtkit_helper_poll(dev, 0);
+		if (ret && ret != -ETIMEDOUT) {
+			printf("MTP: input startup mailbox error %d\n", ret);
+			return ret;
+		}
+		udelay(50);
+	}
+	debug("MTP: input discovery FIFO has %u bytes at handoff\n",
+	      readl(data + DOCKCHANNEL_DATA_RX_COUNT));
+	if (readl(data + DOCKCHANNEL_DATA_RX_COUNT) < 8)
+		return -ETIMEDOUT;
+	apple_rtkit_helper_input_ready(dev);
+
+	return 0;
 }
 
 /* Node offsets move as the blob grows, so always look them up by path. */

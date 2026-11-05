@@ -1543,7 +1543,6 @@ static int j713_prepare_input(void)
 	ofnode node, input;
 	struct udevice *helper;
 	fdt_addr_t data;
-	ulong start;
 	int ret, index;
 
 	node = ofnode_by_compatible(ofnode_null(),
@@ -1566,24 +1565,7 @@ static int j713_prepare_input(void)
 	if (data == FDT_ADDR_T_NONE)
 		return -EINVAL;
 
-	/* AP power ON can precede IOReport/buffer requests. Finish those
-	 * startup exchanges before Linux inherits a mailbox it will not poll.
-	 * Observe the first HID header without consuming any FIFO bytes. */
-	start = get_timer(0);
-	while (readl((void *)(data + 0x2c)) < 8 && get_timer(start) < 2000) {
-		ret = apple_rtkit_helper_poll(helper, 0);
-		if (ret && ret != -ETIMEDOUT) {
-			printf("J713: input startup mailbox error %d\n", ret);
-			return ret;
-		}
-		udelay(50);
-	}
-	debug("J713: input discovery FIFO has %u bytes at handoff\n",
-	      readl((void *)(data + 0x2c)));
-	if (readl((void *)(data + 0x2c)) < 8)
-		return -ETIMEDOUT;
-	apple_rtkit_helper_input_ready(helper);
-	return 0;
+	return apple_rtkit_helper_prepare_input(helper, (void *)data);
 }
 
 /*

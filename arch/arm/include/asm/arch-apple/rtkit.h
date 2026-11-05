@@ -43,6 +43,20 @@ int apple_rtkit_shutdown(struct apple_rtkit *rtk, int pwrstate);
 int apple_rtkit_helper_poll(struct udevice *dev, ulong timeout);
 /* Only publish a J713 session after its first HID discovery header is pending. */
 void apple_rtkit_helper_input_ready(struct udevice *dev);
+
+/**
+ * apple_rtkit_helper_prepare_input() - Run a started helper until input flows
+ *
+ * Service the helper's startup exchanges until its DockChannel input FIFO
+ * holds the first discovery header, then mark its input session ready for
+ * a live handoff to the OS.
+ *
+ * @dev: Running helper
+ * @data: DockChannel FIFO data registers of the input device
+ * Return: 0 if OK, -ETIMEDOUT if no input arrived within 2 s, other -ve on
+ * a mailbox error
+ */
+int apple_rtkit_helper_prepare_input(struct udevice *dev, void *data);
 bool apple_rtkit_helper_input_prepared(struct udevice *dev);
 bool apple_rtkit_helper_input_retained(struct udevice *dev);
 void apple_rtkit_helper_input_failed(struct udevice *dev);
