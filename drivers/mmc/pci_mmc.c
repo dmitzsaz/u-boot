@@ -10,12 +10,15 @@
 #include <malloc.h>
 #include <mapmem.h>
 #include <mmc.h>
+#include <pci.h>
 #include <sdhci.h>
 #include <acpi/acpigen.h>
 #include <acpi/acpi_device.h>
 #include <acpi/acpi_dp.h>
 #include <asm-generic/gpio.h>
 #include <dm/acpi.h>
+#include <linux/bitops.h>
+#include <linux/iopoll.h>
 
 /* Type of MMC device */
 enum {
@@ -34,8 +37,90 @@ struct pci_mmc_priv {
 	struct gpio_desc cd_gpio;
 };
 
+#define PCI_VENDOR_ID_GLI		0x17a0
+#define PCI_DEVICE_ID_GLI_9755		0x9755
+
+/* GL9755 vendor configuration registers, as in Linux's sdhci-pci-gli.c */
+#define GL9755_PECONF			0x44
+#define  GL9755_LFCLK			GENMASK(14, 12)
+#define  GL9755_DMACLK			BIT(29)
+#define  GL9755_INVERT_CD		BIT(30)
+#define  GL9755_INVERT_WP		BIT(31)
+#define GL9755_PLL			0x64
+#define  GL9755_PLL_DIR			BIT(15)
+#define  GL9755_PLLSSC_EN		BIT(31)
+#define GL9755_WT			0x800
+#define  GL9755_WT_EN			BIT(0)
+
+/* Card detection reports a seated card about 1.2 s after a polarity change */
+#define GL9755_CD_SETTLE_US		2000000
+
+/* The GL975x registers are read in whole 32-bit words, as Linux does */
+static u16 gl9755_readw(struct sdhci_host *host, int reg)
+{
+	return readl(host->ioaddr + (reg & ~3)) >> (8 * (reg & 2));
+}
+
+static u8 gl9755_readb(struct sdhci_host *host, int reg)
+{
+	return readl(host->ioaddr + (reg & ~3)) >> (8 * (reg & 3));
+}
+
+static const struct sdhci_ops gl9755_ops = {
+	.read_w = gl9755_readw,
+	.read_b = gl9755_readb,
+};
+
+/*
+ * Apply the board's card-detect and write-protect polarity in the GL9755
+ * itself (Apple wires both inverted), which is also what makes it power
+ * the slot's pull-ups. Then clear the low-frequency and DMA clock options
+ * and turn off the spread-spectrum PLL, as Linux does, and start the
+ * internal clock, without which the controller does not finish a full
+ * reset.
+ */
+static int gl9755_init(struct udevice *dev, struct pci_mmc_plat *plat,
+		       struct sdhci_host *host)
+{
+	u32 conf, prev, state, clk;
+	int ret;
+
+	dm_pci_clrset_config32(dev, GL9755_WT, GL9755_WT_EN, GL9755_WT_EN);
+	dm_pci_read_config32(dev, GL9755_PECONF, &prev);
+	conf = prev & ~(GL9755_LFCLK | GL9755_DMACLK | GL9755_INVERT_CD |
+			GL9755_INVERT_WP);
+	if (dev_read_bool(dev, "cd-inverted"))
+		conf |= GL9755_INVERT_CD;
+	if (dev_read_bool(dev, "wp-inverted"))
+		conf |= GL9755_INVERT_WP;
+	dm_pci_write_config32(dev, GL9755_PECONF, conf);
+	dm_pci_clrset_config32(dev, GL9755_PLL,
+			       GL9755_PLL_DIR | GL9755_PLLSSC_EN, 0);
+	dm_pci_clrset_config32(dev, GL9755_WT, GL9755_WT_EN, 0);
+
+	/* The present state already has the board's polarity */
+	plat->cfg.host_caps &= ~MMC_CAP_CD_ACTIVE_HIGH;
+
+	host->ops = &gl9755_ops;
+	sdhci_writew(host, SDHCI_CLOCK_INT_EN, SDHCI_CLOCK_CONTROL);
+	/* Word read: SDHCI_CLOCK_CONTROL is the low half of its word */
+	ret = readl_poll_timeout(host->ioaddr + SDHCI_CLOCK_CONTROL, clk,
+				 clk & SDHCI_CLOCK_INT_STABLE, 20000);
+	if (ret)
+		return ret;
+
+	/* An empty slot only costs time when the polarity changed */
+	if ((conf ^ prev) & GL9755_INVERT_CD)
+		readl_poll_timeout(host->ioaddr + SDHCI_PRESENT_STATE, state,
+				   state & SDHCI_CARD_PRESENT,
+				   GL9755_CD_SETTLE_US);
+
+	return 0;
+}
+
 static int pci_mmc_probe(struct udevice *dev)
 {
+	struct pci_child_plat *pplat = dev_get_parent_plat(dev);
 	struct mmc_uclass_priv *upriv = dev_get_uclass_priv(dev);
 	struct pci_mmc_plat *plat = dev_get_plat(dev);
 	struct pci_mmc_priv *priv = dev_get_priv(dev);
@@ -51,6 +136,12 @@ static int pci_mmc_probe(struct udevice *dev)
 
 	host->ioaddr = dm_pci_map_bar(dev, PCI_BASE_ADDRESS_0, 0, 0,
 				      PCI_REGION_TYPE, PCI_REGION_MEM);
+	if (pplat->vendor == PCI_VENDOR_ID_GLI &&
+	    pplat->device == PCI_DEVICE_ID_GLI_9755) {
+		ret = gl9755_init(dev, plat, host);
+		if (ret)
+			return ret;
+	}
 	host->name = dev->name;
 	host->cd_gpio = priv->cd_gpio;
 	host->mmc = &plat->mmc;

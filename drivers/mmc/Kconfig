@@ -357,6 +357,7 @@ config MMC_MXS
 config MMC_PCI
 	bool "Support for MMC controllers on PCI"
 	depends on MMC_SDHCI
+	select MMC_SDHCI_IO_ACCESSORS
 	help
 	  This selects PCI-based MMC controllers.
 	  If you have an MMC controller on a PCI bus, say Y here.
