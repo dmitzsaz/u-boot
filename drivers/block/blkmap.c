@@ -354,16 +354,39 @@ static int blkmap_dev_bind(struct udevice *dev)
 	return 0;
 }
 
+/* Run each slice's destroy hook once */
+static void blkmap_destroy_slices(struct blkmap *bm)
+{
+	struct blkmap_slice *bms;
+
+	list_for_each_entry(bms, &bm->slices, node) {
+		if (bms->destroy)
+			bms->destroy(bm, bms);
+		bms->destroy = NULL;
+	}
+}
+
+/*
+ * Removal happens on the way to an OS (DM_FLAG_OS_PREPARE) or just before
+ * unbinding. Nothing reads the blkmap afterwards, and memory U-Boot hands
+ * to the OS must not keep the key of a crypt slice.
+ */
+static int blkmap_dev_remove(struct udevice *dev)
+{
+	blkmap_destroy_slices(dev_get_plat(dev));
+
+	return 0;
+}
+
 static int blkmap_dev_unbind(struct udevice *dev)
 {
 	struct blkmap *bm = dev_get_plat(dev);
 	struct blkmap_slice *bms, *tmp;
 	int err;
 
+	blkmap_destroy_slices(bm);
 	list_for_each_entry_safe(bms, tmp, &bm->slices, node) {
 		list_del(&bms->node);
-		if (bms->destroy)
-			bms->destroy(bm, bms);
 		free(bms);
 	}
 
@@ -378,8 +401,10 @@ U_BOOT_DRIVER(blkmap_root) = {
 	.name		= "blkmap_dev",
 	.id		= UCLASS_BLKMAP,
 	.bind		= blkmap_dev_bind,
+	.remove		= blkmap_dev_remove,
 	.unbind		= blkmap_dev_unbind,
 	.plat_auto	= sizeof(struct blkmap),
+	.flags		= DM_FLAG_OS_PREPARE,
 };
 
 struct udevice *blkmap_from_label(const char *label)
