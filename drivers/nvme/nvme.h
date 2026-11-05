@@ -685,6 +685,14 @@ struct nvme_ns {
 
 struct nvme_ops {
 	/**
+	 * alloc_dma - Allocate controller-visible queues and PRP lists
+	 *
+	 * Paired with free_dma. Drivers handing a live controller to the OS
+	 * can retain these allocations outside U-Boot's reusable heap.
+	 */
+	void *(*alloc_dma)(struct nvme_dev *dev, size_t align, size_t size);
+	void (*free_dma)(struct nvme_dev *dev, void *buffer);
+	/**
 	 * setup_queue - Controller-specific NVM Express queue setup.
 	 *
 	 * @nvmeq: NVM Express queue
@@ -756,6 +764,9 @@ struct nvme_ops {
  * Return: 0 if OK, -ve on error
  */
 int nvme_init(struct udevice *udev);
+
+void *nvme_alloc_dma(struct nvme_dev *dev, size_t align, size_t size);
+void nvme_free_dma(struct nvme_dev *dev, void *buffer);
 
 /**
  * nvme_retire_io_queues() - Delete the I/O queues, keep the controller enabled

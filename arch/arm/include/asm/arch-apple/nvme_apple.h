@@ -2,7 +2,7 @@
 #ifndef __ASM_ARCH_APPLE_NVME_APPLE_H
 #define __ASM_ARCH_APPLE_NVME_APPLE_H
 
-/* Reserve, in the OS devicetree, RTKit buffers of an ANS session handed on live. */
+/* Reserve live ANS firmware buffers, queues, TCBs and PRP lists for the OS. */
 #if IS_ENABLED(CONFIG_NVME_APPLE)
 int apple_nvme_fdt_fixup(void *blob);
 #else

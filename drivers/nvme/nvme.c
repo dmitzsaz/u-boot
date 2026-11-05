@@ -27,6 +27,26 @@
 #define IO_TIMEOUT		30
 #define MAX_PRP_POOL		512
 
+void *nvme_alloc_dma(struct nvme_dev *dev, size_t align, size_t size)
+{
+	const struct nvme_ops *ops = dev->udev->driver->ops;
+
+	if (ops && ops->alloc_dma)
+		return ops->alloc_dma(dev, align, size);
+
+	return memalign(align, size);
+}
+
+void nvme_free_dma(struct nvme_dev *dev, void *buffer)
+{
+	const struct nvme_ops *ops = dev->udev->driver->ops;
+
+	if (ops && ops->free_dma)
+		ops->free_dma(dev, buffer);
+	else
+		free(buffer);
+}
+
 /**
  * nvme_invalidate_cache_aligned() - invalidate cache with proper alignment
  *
@@ -115,16 +135,17 @@ static int nvme_setup_prps(struct nvme_dev *dev, u64 *prp2,
 	num_pages = DIV_ROUND_UP(nprps - 1, prps_per_page - 1);
 
 	if (nprps > dev->prp_entry_num) {
-		free(dev->prp_pool);
 		/*
 		 * Always increase in increments of pages.  It doesn't waste
 		 * much memory and reduces the number of allocations.
 		 */
-		dev->prp_pool = memalign(page_size, num_pages * page_size);
-		if (!dev->prp_pool) {
+		prp_pool = nvme_alloc_dma(dev, page_size, num_pages * page_size);
+		if (!prp_pool) {
 			printf("Error: malloc prp_pool fail\n");
 			return -ENOMEM;
 		}
+		nvme_free_dma(dev, dev->prp_pool);
+		dev->prp_pool = prp_pool;
 		dev->prp_entry_num = num_pages * (prps_per_page - 1) + 1;
 	}
 
@@ -349,12 +370,12 @@ static struct nvme_queue *nvme_alloc_queue(struct nvme_dev *dev,
 		return NULL;
 	memset(nvmeq, 0, sizeof(*nvmeq));
 
-	nvmeq->cqes = (void *)memalign(4096, NVME_CQ_ALLOCATION(depth));
+	nvmeq->cqes = nvme_alloc_dma(dev, 4096, NVME_CQ_ALLOCATION(depth));
 	if (!nvmeq->cqes)
 		goto free_nvmeq;
 	memset((void *)nvmeq->cqes, 0, NVME_CQ_SIZE(depth));
 
-	nvmeq->sq_cmds = (void *)memalign(4096, NVME_SQ_SIZE(depth));
+	nvmeq->sq_cmds = nvme_alloc_dma(dev, 4096, NVME_SQ_SIZE(depth));
 	if (!nvmeq->sq_cmds)
 		goto free_queue;
 	memset((void *)nvmeq->sq_cmds, 0, NVME_SQ_SIZE(depth));
@@ -366,17 +387,19 @@ static struct nvme_queue *nvme_alloc_queue(struct nvme_dev *dev,
 	nvmeq->q_db = &dev->dbs[qid * 2 * dev->db_stride];
 	nvmeq->q_depth = depth;
 	nvmeq->qid = qid;
+	ops = (struct nvme_ops *)dev->udev->driver->ops;
+	if (ops && ops->setup_queue && ops->setup_queue(nvmeq))
+		goto free_sq;
+
 	dev->queue_count++;
 	dev->queues[qid] = nvmeq;
 
-	ops = (struct nvme_ops *)dev->udev->driver->ops;
-	if (ops && ops->setup_queue)
-		ops->setup_queue(nvmeq);
-
 	return nvmeq;
 
+ free_sq:
+	nvme_free_dma(dev, nvmeq->sq_cmds);
  free_queue:
-	free((void *)nvmeq->cqes);
+	nvme_free_dma(dev, nvmeq->cqes);
  free_nvmeq:
 	free(nvmeq);
 
@@ -433,8 +456,8 @@ static int nvme_shutdown_ctrl(struct nvme_dev *dev)
 
 static void nvme_free_queue(struct nvme_queue *nvmeq)
 {
-	free((void *)nvmeq->cqes);
-	free(nvmeq->sq_cmds);
+	nvme_free_dma(nvmeq->dev, nvmeq->cqes);
+	nvme_free_dma(nvmeq->dev, nvmeq->sq_cmds);
 	free(nvmeq);
 }
 
@@ -1094,7 +1117,7 @@ int nvme_init(struct udevice *udev)
 	}
 
 	/* Allocate after the page size is known */
-	ndev->prp_pool = memalign(ndev->page_size, MAX_PRP_POOL);
+	ndev->prp_pool = nvme_alloc_dma(ndev, ndev->page_size, MAX_PRP_POOL);
 	if (!ndev->prp_pool) {
 		ret = -ENOMEM;
 		printf("Error: %s: Out of memory!\n", udev->name);
@@ -1165,7 +1188,7 @@ int nvme_init(struct udevice *udev)
 free_id:
 	free(id);
 free_prp_pool:
-	free((void *)ndev->prp_pool);
+	nvme_free_dma(ndev, ndev->prp_pool);
 free_queue:
 	free((void *)ndev->queues);
 free_nvme:
@@ -1175,27 +1198,38 @@ free_nvme:
 int nvme_retire_io_queues(struct udevice *udev)
 {
 	struct nvme_dev *ndev = dev_get_priv(udev);
-	int qid, ret = 0;
+	int qid, ret;
+
+	if (ndev->failed)
+		return -EIO;
+
+	/*
+	 * Recover outstanding admin and I/O commands before deleting anything.
+	 * A reset during deletion would recreate queues already deleted.
+	 */
+	for (qid = 0; qid < ndev->queue_count; qid++) {
+		if (!ndev->queues[qid])
+			continue;
+		ret = nvme_reap_timed_out(ndev->queues[qid], IO_TIMEOUT);
+		if (!ret)
+			continue;
+		if (ndev->failed || nvme_reset_ctrl(ndev))
+			return -EIO;
+		break;
+	}
 
 	for (qid = ndev->queue_count - 1; qid > NVME_ADMIN_Q; qid--) {
 		if (!ndev->queues[qid])
 			continue;
-		/*
-		 * The next owner must not inherit a command in flight.  Wait a
-		 * bounded time for one that timed out, reset the controller if
-		 * it does not complete, then delete the queue anyway.
-		 */
-		if (nvme_reap_timed_out(ndev->queues[qid], IO_TIMEOUT) &&
-		    (ndev->failed || nvme_reset_ctrl(ndev))) {
-			printf("Error: %s: I/O queue %d still has a command outstanding\n",
-			       udev->name, qid);
-			ret = -EIO;
-		}
-		ret |= nvme_delete_sq(ndev, qid);
-		ret |= nvme_delete_cq(ndev, qid);
+		ret = nvme_delete_sq(ndev, qid);
+		if (ret)
+			return ret;
+		ret = nvme_delete_cq(ndev, qid);
+		if (ret)
+			return ret;
 	}
 
-	return ret ? -EIO : 0;
+	return 0;
 }
 
 int nvme_shutdown(struct udevice *udev)

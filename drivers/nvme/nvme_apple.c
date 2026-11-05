@@ -176,6 +176,76 @@ struct apple_nvme_priv {
 	u32 __iomem *q_db[NVME_Q_NUM]; /* Submission queue doorbell */
 };
 
+struct ans_dma_buffer {
+	struct list_head node;
+	phys_addr_t addr;
+	phys_size_t size;
+};
+
+static LIST_HEAD(ans_dma_buffers);
+
+/*
+ * Every page reachable by a live controller stays reserved until OS takeover.
+ * Keep old PRP pools too: moving a list at handoff cannot revoke its old DMA
+ * address. Queue metadata itself is only used by the CPU and stays on the heap.
+ */
+static void *apple_nvme_alloc_dma(struct nvme_dev *ndev, size_t align,
+				  size_t size)
+{
+	struct apple_nvme_priv *priv =
+		container_of(ndev, struct apple_nvme_priv, ndev);
+	struct ans_dma_buffer *buf, *next, *new;
+	struct list_head *pos = &ans_dma_buffers;
+	phys_addr_t addr, end;
+	void *buffer;
+
+	if (!priv->hw->post_m4)
+		return memalign(align, size);
+
+	new = malloc(sizeof(*new));
+	if (!new)
+		return NULL;
+
+	size = ALIGN(size, SZ_16K);
+	if (lmb_alloc_mem(LMB_MEM_ALLOC_ANY, max_t(size_t, align, SZ_16K),
+			  &addr, size, LMB_NOOVERWRITE)) {
+		free(new);
+		return NULL;
+	}
+	buffer = map_sysmem(addr, size);
+	memset(buffer, 0, size);
+	flush_dcache_range((ulong)buffer, (ulong)buffer + size);
+
+	/* Sorted, disjoint 16 KiB ranges, merging shared or adjacent pages. */
+	end = addr + size;
+	list_for_each_entry_safe(buf, next, &ans_dma_buffers, node) {
+		if (end < buf->addr) {
+			pos = &buf->node;
+			break;
+		}
+		if (addr > buf->addr + buf->size)
+			continue;
+		addr = min(addr, buf->addr);
+		end = max(end, buf->addr + buf->size);
+		list_del(&buf->node);
+		free(buf);
+	}
+	new->addr = addr;
+	new->size = end - addr;
+	list_add_tail(&new->node, pos);
+
+	return buffer;
+}
+
+static void apple_nvme_free_dma(struct nvme_dev *ndev, void *buffer)
+{
+	struct apple_nvme_priv *priv =
+		container_of(ndev, struct apple_nvme_priv, ndev);
+
+	if (!priv->hw->post_m4)
+		free(buffer);
+}
+
 /* The block holding LINEAR_SQ_CTRL and the linear SQ doorbells */
 static void __iomem *apple_nvme_lsq(struct apple_nvme_priv *priv)
 {
@@ -186,7 +256,8 @@ static void __iomem *apple_nvme_lsq(struct apple_nvme_priv *priv)
 static void *apple_nvme_tcbs(struct apple_nvme_priv *priv, u16 qid)
 {
 	if (!priv->tcbs[qid]) {
-		priv->tcbs[qid] = memalign(SZ_16K, ANS_NVMMU_TCB_SIZE);
+		priv->tcbs[qid] = nvme_alloc_dma(&priv->ndev, SZ_16K,
+						 ANS_NVMMU_TCB_SIZE);
 		if (!priv->tcbs[qid])
 			return NULL;
 		memset(priv->tcbs[qid], 0, ANS_NVMMU_TCB_SIZE);
@@ -298,6 +369,7 @@ static struct {
 	phys_size_t size;
 } ans_handoff_bufs[ANS_HANDOFF_MAX_BUFS];
 static int ans_handoff_nbufs;
+static bool ans_handoff_failed;
 
 static int nvme_handoff_shmem_setup(void *cookie, struct apple_rtkit_buffer *buf)
 {
@@ -331,14 +403,12 @@ static int nvme_handoff_shmem_setup(void *cookie, struct apple_rtkit_buffer *buf
 	return 0;
 }
 
-int apple_nvme_fdt_fixup(void *blob)
+static int apple_nvme_fdt_reserve(void *blob, const char *prefix,
+				  phys_addr_t addr, phys_size_t size)
 {
-	int resv, sub, i, ret;
+	int resv, sub, ret;
 	char name[40];
 	fdt64_t reg[2];
-
-	if (!ans_handoff_nbufs)
-		return 0;
 
 	resv = fdt_path_offset(blob, "/reserved-memory");
 	if (resv < 0)
@@ -346,19 +416,55 @@ int apple_nvme_fdt_fixup(void *blob)
 	if (fdt_address_cells(blob, resv) != 2 || fdt_size_cells(blob, resv) != 2)
 		return -EINVAL;
 
+	snprintf(name, sizeof(name), "%s@%llx", prefix,
+		 (unsigned long long)addr);
+	sub = fdt_subnode_offset(blob, resv, name);
+	if (sub == -FDT_ERR_NOTFOUND)
+		sub = fdt_add_subnode(blob, resv, name);
+	if (sub < 0)
+		return sub;
+	reg[0] = cpu_to_fdt64(addr);
+	reg[1] = cpu_to_fdt64(size);
+	ret = fdt_setprop(blob, sub, "reg", reg, sizeof(reg));
+	return ret ?: fdt_setprop_empty(blob, sub, "no-map");
+}
+
+int apple_nvme_fdt_fixup(void *blob)
+{
+	struct ans_dma_buffer *buf;
+	int i, ret, resv, sub;
+	const char *name;
+
+	if (ans_handoff_failed)
+		return -EIO;
+
+	/* A later fixup may cover more allocations and coalesce earlier ranges. */
+	resv = fdt_path_offset(blob, "/reserved-memory");
+	if (resv >= 0) {
+		sub = fdt_first_subnode(blob, resv);
+		while (sub >= 0) {
+			name = fdt_get_name(blob, sub, NULL);
+			if (name && !strncmp(name, "nvme-queues@", 12)) {
+				ret = fdt_del_node(blob, sub);
+				if (ret)
+					return ret;
+				sub = fdt_first_subnode(blob, resv);
+			} else {
+				sub = fdt_next_subnode(blob, sub);
+			}
+		}
+	}
+
 	for (i = 0; i < ans_handoff_nbufs; i++) {
-		snprintf(name, sizeof(name), "ans-rtkit@%llx",
-			 (unsigned long long)ans_handoff_bufs[i].addr);
-		resv = fdt_path_offset(blob, "/reserved-memory");
-		sub = fdt_subnode_offset(blob, resv, name);
-		if (sub == -FDT_ERR_NOTFOUND)
-			sub = fdt_add_subnode(blob, resv, name);
-		if (sub < 0)
-			return sub;
-		reg[0] = cpu_to_fdt64(ans_handoff_bufs[i].addr);
-		reg[1] = cpu_to_fdt64(ans_handoff_bufs[i].size);
-		ret = fdt_setprop(blob, sub, "reg", reg, sizeof(reg));
-		ret = ret ?: fdt_setprop_empty(blob, sub, "no-map");
+		ret = apple_nvme_fdt_reserve(blob, "ans-rtkit",
+					     ans_handoff_bufs[i].addr,
+					     ans_handoff_bufs[i].size);
+		if (ret)
+			return ret;
+	}
+	list_for_each_entry(buf, &ans_dma_buffers, node) {
+		ret = apple_nvme_fdt_reserve(blob, "nvme-queues", buf->addr,
+					     buf->size);
 		if (ret)
 			return ret;
 	}
@@ -871,8 +977,10 @@ static int apple_nvme_probe(struct udevice *dev)
 	priv->ndev.max_ns_id = priv->hw->max_ns_id;
 
 	ret = nvme_init(dev);
-	if (ret && priv->hw->post_m4)
+	if (ret && priv->hw->post_m4) {
 		apple_nvme_adopt_failed = true;
+		ans_handoff_failed = true;
+	}
 
 	return ret;
 }
@@ -881,6 +989,7 @@ static int apple_nvme_remove(struct udevice *dev)
 {
 	struct apple_nvme_priv *priv = dev_get_priv(dev);
 	u32 ctrl;
+	int ret;
 
 	if (priv->hw->post_m4) {
 		/*
@@ -898,8 +1007,11 @@ static int apple_nvme_remove(struct udevice *dev)
 		 * not flush here: on the A18 Pro a Flush to one of Apple's small
 		 * system namespaces (2 to 4) is fatal to the firmware.
 		 */
-		if (nvme_retire_io_queues(dev))
-			printf("%s: could not delete the I/O queues\n", dev->name);
+		ret = nvme_retire_io_queues(dev);
+		/* OS cleanup ignores remove errors; reusable payload DMA is unsafe. */
+		if (ret)
+			panic("%s: refusing OS entry after NVMe queue retirement error %d\n",
+			      dev->name, ret);
 		nvme_writeq(0, priv->base + ANS_IOSQ_BASE);
 		nvme_writeq(0, priv->base + ANS_IOCQ_BASE);
 		debug("%s: handing over the live ANS session (CC %#x CSTS %#x)\n",
@@ -928,6 +1040,8 @@ static int apple_nvme_remove(struct udevice *dev)
 }
 
 static const struct nvme_ops apple_nvme_ops = {
+	.alloc_dma = apple_nvme_alloc_dma,
+	.free_dma = apple_nvme_free_dma,
 	.setup_queue = apple_nvme_setup_queue,
 	.submit_cmd = apple_nvme_submit_cmd,
 	.complete_cmd = apple_nvme_complete_cmd,

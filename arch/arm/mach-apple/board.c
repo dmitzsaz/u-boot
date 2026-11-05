@@ -1789,10 +1789,10 @@ int ft_board_setup(void *blob, struct bd_info *bd)
 		debug("J713: OS devicetree runtime import complete\n");
 	}
 
-	/* RTKit buffers of an ANS session handed on live stay the firmware's. */
+	/* A live ANS session retains ownership of firmware and NVMe DMA buffers. */
 	ret = apple_nvme_fdt_fixup(blob);
 	if (ret) {
-		printf("ANS: cannot reserve its RTKit buffers for the OS (%d)\n", ret);
+		printf("ANS: cannot hand off its DMA buffers to the OS (%d)\n", ret);
 		return ret;
 	}
 
