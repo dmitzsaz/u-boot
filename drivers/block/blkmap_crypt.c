@@ -252,7 +252,7 @@ static ulong crypt_read_cbc(struct blkmap *bm, struct blkmap_crypt *bmc,
 	lbaint_t i;
 
 	/* Expand AES key */
-	aes_expand_key(bmc->master_key, bmc->key_size * 8, expkey);
+	aes_expand_key(bmc->master_key, bmc->key_size, expkey);
 
 	/* Decrypt each sector */
 	for (i = 0; i < blkcnt; i++) {
@@ -272,10 +272,10 @@ static ulong crypt_read_cbc(struct blkmap *bm, struct blkmap_crypt *bmc,
 			*(u64 *)sector_iv = cpu_to_le64(sector);
 
 			/* Expand ESSIV key */
-			aes_expand_key(bmc->essiv_key, 256, essiv_expkey);
+			aes_expand_key(bmc->essiv_key, AES256_KEY_LENGTH, essiv_expkey);
 
 			/* Encrypt sector number with ESSIV key to get IV */
-			aes_encrypt(256, sector_iv, essiv_expkey, iv);
+			aes_encrypt(AES256_KEY_LENGTH, sector_iv, essiv_expkey, iv);
 		} else {
 			/*
 			 * Plain64 mode:
@@ -286,7 +286,7 @@ static ulong crypt_read_cbc(struct blkmap *bm, struct blkmap_crypt *bmc,
 		}
 
 		/* Decrypt sector using AES-CBC */
-		aes_cbc_decrypt_blocks(bmc->key_size * 8, expkey, iv,
+		aes_cbc_decrypt_blocks(bmc->key_size, expkey, iv,
 				       encrypted_buf + i * bd->blksz,
 				       dest + i * bd->blksz,
 				       bd->blksz / AES_BLOCK_LENGTH);

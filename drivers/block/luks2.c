@@ -550,7 +550,7 @@ static int decrypt_km_cbc(const u8 *derived_key, uint key_size,
 {
 	u8 expkey[AES256_EXPAND_KEY_LENGTH];
 
-	aes_expand_key(derived_key, key_size * 8, expkey);
+	aes_expand_key(derived_key, key_size, expkey);
 
 	/* Check if ESSIV mode is used */
 	if (strstr(encrypt, "essiv")) {
@@ -561,7 +561,7 @@ static int decrypt_km_cbc(const u8 *derived_key, uint key_size,
 		u8 iv[AES_BLOCK_LENGTH];
 
 		memset(iv, '\0', sizeof(iv));
-		aes_cbc_decrypt_blocks(key_size * 8, expkey, iv, km, split_key,
+		aes_cbc_decrypt_blocks(key_size, expkey, iv, km, split_key,
 				       size / AES_BLOCK_LENGTH);
 	}
 

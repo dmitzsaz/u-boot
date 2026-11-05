@@ -253,7 +253,7 @@ void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey,
 	log_debug_hex("ESSIV key[0-7]:", essiv_key_material, 8);
 
 	/* Expand ESSIV key for AES */
-	aes_expand_key(essiv_key_material, 256, essiv_expkey);
+	aes_expand_key(essiv_key_material, AES256_KEY_LENGTH, essiv_expkey);
 
 	/*
 	 * Decrypt each sector with its own IV
@@ -271,7 +271,7 @@ void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey,
 		put_unaligned_le32(rel_sect, sector_iv);
 
 		/* Encrypt sector number with ESSIV key to get IV */
-		aes_encrypt(256, sector_iv, essiv_expkey, iv);
+		aes_encrypt(AES256_KEY_LENGTH, sector_iv, essiv_expkey, iv);
 
 		/* Show the first sector for debugging */
 		if (!rel_sect) {
@@ -280,7 +280,7 @@ void essiv_decrypt(const u8 *derived_key, uint key_size, u8 *expkey,
 		}
 
 		/* Decrypt this sector */
-		aes_cbc_decrypt_blocks(key_size * 8, expkey, iv,
+		aes_cbc_decrypt_blocks(key_size, expkey, iv,
 				       km + (rel_sect * blksz),
 				       split_key + (rel_sect * blksz),
 				       blksz / AES_BLOCK_LENGTH);
@@ -392,7 +392,7 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 	log_debug_hex("derived_key", derived_key, key_size);
 
 	/* Decrypt key material */
-	aes_expand_key(derived_key, key_size * 8, expkey);
+	aes_expand_key(derived_key, key_size, expkey);
 
 	log_debug_hex("expanded key [0-15]:", expkey, 16);
 
@@ -404,7 +404,7 @@ static int try_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 		/* Plain CBC with zero IV */
 		log_debug("using plain CBC mode\n");
 		memset(iv, '\0', sizeof(iv));
-		aes_cbc_decrypt_blocks(key_size * 8, expkey, iv, km, split_key,
+		aes_cbc_decrypt_blocks(key_size, expkey, iv, km, split_key,
 				       split_key_size / AES_BLOCK_LENGTH);
 	}
 
