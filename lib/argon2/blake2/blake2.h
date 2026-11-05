@@ -21,6 +21,19 @@
 
 #include <argon2.h>
 
+/*
+ * lib/blake2 (CONFIG_BLAKE2, used by btrfs) exports the same reference
+ * BLAKE2b API. Give this copy its own link-time names so that both can be
+ * built into one image.
+ */
+#define blake2b_init		argon2_blake2b_init
+#define blake2b_init_key	argon2_blake2b_init_key
+#define blake2b_init_param	argon2_blake2b_init_param
+#define blake2b_update		argon2_blake2b_update
+#define blake2b_final		argon2_blake2b_final
+#define blake2b			argon2_blake2b
+#define blake2b_long		argon2_blake2b_long
+
 #if defined(__cplusplus)
 extern "C" {
 #endif
