@@ -254,7 +254,7 @@ static ulong blkmap_blk_read_slice(struct blkmap *bm, struct blkmap_slice *bms,
 	lbaint_t nr, cnt;
 
 	nr = blknr - bms->blknr;
-	cnt = (blkcnt < bms->blkcnt) ? blkcnt : bms->blkcnt;
+	cnt = min(blkcnt, bms->blkcnt - nr);
 	return bms->read(bm, bms, nr, cnt, buffer);
 }
 
@@ -290,7 +290,7 @@ static ulong blkmap_blk_write_slice(struct blkmap *bm, struct blkmap_slice *bms,
 		return 0;
 
 	nr = blknr - bms->blknr;
-	cnt = (blkcnt < bms->blkcnt) ? blkcnt : bms->blkcnt;
+	cnt = min(blkcnt, bms->blkcnt - nr);
 	return bms->write(bm, bms, nr, cnt, buffer);
 }
 
