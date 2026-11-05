@@ -13,6 +13,7 @@
 #include <memalign.h>
 #include <uboot_aes.h>
 #include <mbedtls/aes.h>
+#include <mbedtls/platform_util.h>
 #include <dm/device-internal.h>
 #include <linux/string.h>
 #include "blkmap_internal.h"
@@ -347,9 +348,9 @@ static void blkmap_crypt_destroy(struct blkmap *bm, struct blkmap_slice *bms)
 {
 	struct blkmap_crypt *bmc = container_of(bms, struct blkmap_crypt, slice);
 
-	/* Securely wipe master key before freeing */
-	memset(bmc->master_key, '\0', sizeof(bmc->master_key));
-	free(bmc);
+	/* Wipe the keys; the blkmap frees the slice */
+	mbedtls_platform_zeroize(bmc->master_key, sizeof(bmc->master_key));
+	mbedtls_platform_zeroize(bmc->essiv_key, sizeof(bmc->essiv_key));
 }
 
 int blkmap_map_crypt(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
