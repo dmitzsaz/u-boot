@@ -1537,6 +1537,110 @@ static void apple_efi_late_init(bool start_keyboard)
 	apple_loader_initrd(chosen);
 }
 
+/*
+ * Boot selections the boot loader passes in /chosen, see
+ * doc/board/apple/boot.rst. Every variable is only a default: a saved or
+ * preboot environment may already have set it.
+ */
+static const char * const apple_luks_env[][2] = {
+	{ "aurora_luks_if", "nvme" },
+	/* File names of the existing encrypted /boot installations */
+	{ "aurora_luks_kernel", "/boot/Image-j704" },
+	{ "aurora_luks_initrd", "/boot/initramfs-j704-crypt.img" },
+	{ "aurora_luks_extlinux", "/boot/extlinux/extlinux.conf" },
+	{ "aurora_luks_input", "mtpkbd start" },
+	/*
+	 * Ask up to three times for the passphrase. Boot an extlinux.conf in
+	 * the volume if there is one, else the kernel and initramfs named
+	 * above; the mapping, and with it the key, is gone before the OS
+	 * runs (sysboot tears it down on the way to the OS).
+	 */
+	{ "aurora_luks_boot",
+	  "run aurora_luks_input; "
+	  "setenv aurora_luks_dev; "
+	  "for try in 1 2 3; do "
+	  "if test -z \"${aurora_luks_dev}\" && "
+	  "luks unlock ${aurora_luks_if} ${aurora_luks_part}; then "
+	  "blkmap get luks-${aurora_luks_if}-${aurora_luks_part} dev "
+	  "aurora_luks_dev; fi; done; "
+	  "if test -n \"${aurora_luks_dev}\"; then "
+	  "setenv bootargs \"${aurora_bootargs} ${aurora_luks_bootargs}\"; "
+	  "if test -e blkmap ${aurora_luks_dev} ${aurora_luks_extlinux}; then "
+	  "sysboot blkmap ${aurora_luks_dev} any ${scriptaddr} "
+	  "${aurora_luks_extlinux}; "
+	  "elif load blkmap ${aurora_luks_dev} ${kernel_addr_r} "
+	  "${aurora_luks_kernel} && "
+	  "load blkmap ${aurora_luks_dev} ${ramdisk_addr_r} "
+	  "${aurora_luks_initrd}; then "
+	  "setenv aurora_luks_rd ${ramdisk_addr_r}:${filesize}; "
+	  "luks close ${aurora_luks_if} ${aurora_luks_part}; "
+	  "setenv aurora_luks_dev; "
+	  "booti ${kernel_addr_r} ${aurora_luks_rd} ${fdtcontroladdr}; fi; "
+	  "if test -n \"${aurora_luks_dev}\"; then "
+	  "luks close ${aurora_luks_if} ${aurora_luks_part}; fi; fi; "
+	  "echo Encrypted /boot could not be booted" },
+};
+
+static const char * const apple_sd_env[][2] = {
+	{ "aurora_sd_part", "0:1" },
+	/* The boot loader chose this configuration: no other is tried */
+	{ "aurora_sd_boot",
+	  "setenv bootargs \"${aurora_bootargs}\"; "
+	  "sysboot mmc ${aurora_sd_part} any ${scriptaddr} "
+	  "${aurora_sd_extlinux}; "
+	  "echo SD card configuration ${aurora_sd_extlinux} could not be booted" },
+};
+
+static void apple_env_default(const char *name, const char *value)
+{
+	if (value && !env_get(name))
+		env_set(name, value);
+}
+
+/*
+ * The boot loader may name an encrypted (LUKS2) /boot with
+ * aurora,luks-partition, or an extlinux.conf on the SD card with
+ * aurora,sd-extlinux-conf. Either replaces the default boot command, the
+ * encrypted /boot first. Without them the standard boot scan runs.
+ */
+static void apple_chosen_boot_late_init(void)
+{
+	ofnode chosen = ofnode_path("/chosen");
+	const char *luks, *sd, *cmd = NULL;
+	int i;
+
+	if (!ofnode_valid(chosen))
+		return;
+	luks = ofnode_read_string(chosen, "aurora,luks-partition");
+	sd = ofnode_read_string(chosen, "aurora,sd-extlinux-conf");
+	if (!luks && !sd)
+		return;
+
+	/* The boot loader's command line, to which the selections add */
+	apple_env_default("aurora_bootargs",
+			  ofnode_read_string(chosen, "bootargs") ?: "");
+
+	if (luks && IS_ENABLED(CONFIG_CMD_LUKS)) {
+		apple_env_default("aurora_luks_part", luks);
+		apple_env_default("aurora_luks_bootargs",
+				  ofnode_read_string(chosen,
+						     "aurora,luks-bootargs") ?: "");
+		for (i = 0; i < ARRAY_SIZE(apple_luks_env); i++)
+			apple_env_default(apple_luks_env[i][0],
+					  apple_luks_env[i][1]);
+		cmd = "run aurora_luks_boot";
+	} else if (sd && IS_ENABLED(CONFIG_CMD_SYSBOOT)) {
+		apple_env_default("aurora_sd_extlinux", sd);
+		for (i = 0; i < ARRAY_SIZE(apple_sd_env); i++)
+			apple_env_default(apple_sd_env[i][0],
+					  apple_sd_env[i][1]);
+		cmd = "run aurora_sd_boot";
+	}
+
+	if (cmd && !strcmp(env_get("bootcmd") ?: "", CONFIG_BOOTCOMMAND))
+		env_set("bootcmd", cmd);
+}
+
 /* Prepare the live helper before the keyboard console consumes discovery. */
 static int j713_prepare_input(void)
 {
@@ -1601,6 +1705,9 @@ int board_late_init(void)
 
 	env_set("storage_interface", blk_get_uclass_name(UCLASS_NVME));
 	env_set("fw_dev_part", asahi_esp_devpart());
+
+	/* Ahead of the Aurora EFI defaults, which keep a chosen bootcmd */
+	apple_chosen_boot_late_init();
 
 	if (IS_ENABLED(CONFIG_APPLE_MTP_KEYB) &&
 	    (of_machine_is_compatible("apple,j713") ||

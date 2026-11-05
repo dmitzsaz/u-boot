@@ -7,4 +7,5 @@ Apple
    :maxdepth: 2
 
    m1
+   boot
    j873g
