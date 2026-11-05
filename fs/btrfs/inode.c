@@ -367,6 +367,7 @@ int btrfs_read_extent_inline(struct btrfs_path *path,
 	char *dbuf = NULL;
 	u32 csize;
 	u32 dsize;
+	u32 dbuf_size;
 	int ret;
 
 	csize = btrfs_file_extent_inline_item_len(leaf, btrfs_item_nr(slot));
@@ -380,8 +381,14 @@ int btrfs_read_extent_inline(struct btrfs_path *path,
 
 	/* Compressed extent, prepare the compressed and data buffer */
 	dsize = btrfs_file_extent_ram_bytes(leaf, fi);
+	/*
+	 * Linux compresses an inline extent from a whole sector, so the
+	 * frame can decompress to more than ram_bytes; zstd then refuses a
+	 * buffer of only ram_bytes. Decompress into a sector, keep ram_bytes.
+	 */
+	dbuf_size = max_t(u32, dsize, leaf->fs_info->sectorsize);
 	cbuf = malloc(csize);
-	dbuf = malloc(dsize);
+	dbuf = malloc(dbuf_size);
 	if (!cbuf || !dbuf) {
 		ret = -ENOMEM;
 		goto out;
@@ -389,7 +396,7 @@ int btrfs_read_extent_inline(struct btrfs_path *path,
 	read_extent_buffer(leaf, cbuf, btrfs_file_extent_inline_start(fi),
 			   csize);
 	ret = btrfs_decompress(btrfs_file_extent_compression(leaf, fi),
-			       cbuf, csize, dbuf, dsize);
+			       cbuf, csize, dbuf, dbuf_size);
 	if (ret < 0) {
 		ret = -EIO;
 		goto out;
