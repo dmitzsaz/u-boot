@@ -83,6 +83,13 @@ struct dchid_subhdr {
 /* How long "mtpkbd start" services a starting MTP until its keyboard is ready. */
 #define MTP_STARTUP_WAIT_MS	1000
 
+/*
+ * The T8142 MTP cannot be started again once stopped, so U-Boot starts it
+ * only when asked to ("mtpkbd start", e.g. for a passphrase prompt) and
+ * then hands the running session to the OS. Otherwise the OS starts it.
+ */
+static bool mtpkbd_start_requested;
+
 struct dchid_init_hdr {
 	u8 type;
 	u8 unk1;
@@ -429,6 +436,37 @@ static int get_rtkit_helper(struct udevice *dev)
 	return 0;
 }
 
+/*
+ * Start a T8142 MTP for this keyboard and prepare its input session for the
+ * live handoff. A failed start is not retried: the coprocessor may be half
+ * up and cannot be restarted.
+ */
+static int apple_mtp_kbd_start_helper(struct udevice *dev, ofnode of_helper)
+{
+	static bool attempted;
+	struct udevice *helper;
+	fdt_addr_t data;
+	int ret;
+
+	if (!uclass_find_device_by_ofnode(UCLASS_MISC, of_helper, &helper) &&
+	    apple_rtkit_helper_input_prepared(helper))
+		return 0;
+	if (attempted)
+		return -ENODEV;
+	attempted = true;
+
+	data = dev_read_addr_name(dev, "data");
+	if (data == FDT_ADDR_T_NONE)
+		return -EINVAL;
+	ret = uclass_get_device_by_ofnode(UCLASS_MISC, of_helper, &helper);
+	if (!ret)
+		ret = apple_rtkit_helper_prepare_input(helper, (void *)data);
+	if (ret)
+		printf("MTP: failed to start the input helper (%d)\n", ret);
+
+	return ret;
+}
+
 static int apple_mtp_kbd_probe(struct udevice *dev)
 {
 	struct apple_mtp_kbd_priv *priv = dev_get_priv(dev);
@@ -446,12 +484,20 @@ static int apple_mtp_kbd_probe(struct udevice *dev)
 	of_helper = ofnode_get_by_phandle(helper);
 	/*
 	 * The T8142 MTP cannot be restarted after U-Boot shuts it down; it is
-	 * left to the OS unless U-Boot hands its session on. J713 and J614s,
-	 * and T8142 with that handoff, retain the running helper and replay
-	 * discovery packets to Linux at OS handoff.
+	 * left to the OS unless U-Boot is asked to start it, and then hands
+	 * its session on. J713 and J614s, and a started T8142 MTP, retain the
+	 * running helper and replay discovery packets to Linux at OS handoff.
 	 */
 	if (!apple_rtkit_helper_allowed(of_helper))
 		return -ENODEV;
+	if (ofnode_device_is_compatible(of_helper,
+					"apple,t8142-rtk-helper-asc4")) {
+		if (!mtpkbd_start_requested)
+			return -ENODEV;
+		ret = apple_mtp_kbd_start_helper(dev, of_helper);
+		if (ret)
+			return ret;
+	}
 	priv->j713 = of_machine_is_compatible("apple,j713") ||
 		     of_machine_is_compatible("apple,j614s") ||
 		     ofnode_device_is_compatible(of_helper,
@@ -777,6 +823,7 @@ static int do_mtpkbd(struct cmd_tbl *cmdtp, int flag, int argc,
 		}
 	}
 
+	mtpkbd_start_requested = true;
 	ret = mtpkbd_bind_node(node, &kbd);
 	if (!ret)
 		ret = device_probe(kbd);
