@@ -16,6 +16,8 @@
 
 #define APPLE_PMGR_RESET	BIT(31)
 #define APPLE_PMGR_AUTO_ENABLE	BIT(28)
+#define APPLE_PMGR_PS_RESET	BIT(12)
+#define APPLE_PMGR_BUSY		BIT(11)
 #define APPLE_PMGR_DEV_DISABLE	BIT(10)
 #define APPLE_PMGR_WAS_CLKGATED	BIT(9)
 #define APPLE_PMGR_WAS_PWRGATED BIT(8)
@@ -32,6 +34,11 @@
 struct apple_pmgr_priv {
 	struct regmap *regmap;
 	u32 offset;		/* offset within regmap for this domain */
+	/*
+	 * The boot loader handed the domain over active but kept its power
+	 * and reset transitions (apple,inherited-on on T8132 and T8142).
+	 */
+	bool inherited_on;
 };
 
 static int apple_reset_of_xlate(struct reset_ctl *reset_ctl,
@@ -47,6 +54,9 @@ static int apple_reset_assert(struct reset_ctl *reset_ctl)
 {
 	struct apple_pmgr_priv *priv = dev_get_priv(reset_ctl->dev->parent);
 
+	if (priv->inherited_on)
+		return -EPERM;
+
 	regmap_update_bits(priv->regmap, priv->offset,
 			   APPLE_PMGR_FLAGS | APPLE_PMGR_DEV_DISABLE,
 			   APPLE_PMGR_DEV_DISABLE);
@@ -60,6 +70,9 @@ static int apple_reset_assert(struct reset_ctl *reset_ctl)
 static int apple_reset_deassert(struct reset_ctl *reset_ctl)
 {
 	struct apple_pmgr_priv *priv = dev_get_priv(reset_ctl->dev->parent);
+
+	if (priv->inherited_on)
+		return -EPERM;
 
 	regmap_update_bits(priv->regmap, priv->offset,
 			   APPLE_PMGR_FLAGS | APPLE_PMGR_RESET, 0);
@@ -90,6 +103,19 @@ static int apple_pmgr_ps_set(struct power_domain *power_domain, u32 pstate)
 	ret = regmap_read(priv->regmap, priv->offset, &reg);
 	if (ret)
 		return ret;
+	/* An inherited domain is only checked, never written. */
+	if (priv->inherited_on) {
+		if (pstate == APPLE_PMGR_PS_ACTIVE &&
+		    FIELD_GET(APPLE_PMGR_PS_TARGET, reg) == pstate &&
+		    FIELD_GET(APPLE_PMGR_PS_ACTUAL, reg) == pstate &&
+		    !(reg & (APPLE_PMGR_RESET | APPLE_PMGR_AUTO_ENABLE |
+			     APPLE_PMGR_PS_RESET | APPLE_PMGR_BUSY |
+			     APPLE_PMGR_DEV_DISABLE)))
+			return 0;
+		dev_err(power_domain->dev,
+			"inherited domain is not active (register %#x)\n", reg);
+		return -EBUSY;
+	}
 	/*
 	 * Match Linux's inherited-domain test.  With hardware auto-PM enabled,
 	 * an active target may currently be clock- or power-gated while still
@@ -159,6 +185,11 @@ static int apple_pmgr_probe(struct udevice *dev)
 	ret = dev_read_u32(dev, "reg", &priv->offset);
 	if (ret < 0)
 		return ret;
+	/* Other SoCs' trees use the property for something else. */
+	priv->inherited_on =
+		(device_is_compatible(dev, "apple,t8132-pmgr-pwrstate") ||
+		 device_is_compatible(dev, "apple,t8142-pmgr-pwrstate")) &&
+		dev_read_bool(dev, "apple,inherited-on");
 
 	device_bind(dev, &apple_reset_driver, "apple_reset", NULL,
 		    dev_ofnode(dev), &child);
