@@ -15,6 +15,7 @@
 #include <mbedtls/aes.h>
 #include <mbedtls/platform_util.h>
 #include <dm/device-internal.h>
+#include <linux/log2.h>
 #include <linux/string.h>
 #include "blkmap_internal.h"
 
@@ -100,8 +101,9 @@ static int process_xts_sector(struct blkmap_crypt *bmc,
 	 * Prepare data_unit (IV) for XTS decryption.
 	 * For plain64 IV mode, the IV is the 512-byte sector number,
 	 * not the larger XTS sector number. This matches dm-crypt behavior.
+	 * start_blk counts blocks of the device, which may be larger.
 	 */
-	iv_sector = start_blk;
+	iv_sector = start_blk * (blksz / 512);
 	memset(data_unit, '\0', sizeof(data_unit));
 	for (j = 0; j < 8; j++)
 		data_unit[j] = (iv_sector >> (j * 8)) & 0xff;
@@ -170,8 +172,6 @@ static ulong crypt_read_xts(struct blkmap *bm, struct blkmap_crypt *bmc,
 	log_debug("key_size=%u blkcnt=" LBAFU "\n", bmc->key_size, blkcnt);
 	log_debug("XTS: sector_size=%u blocks_per_sector=%u\n",
 		  bmc->sector_size, blks_per_sect);
-	log_debug("Master key (all %u bytes):\n", bmc->key_size);
-	log_debug_hex("", bmc->master_key, bmc->key_size);
 
 	/* Calculate which encryption sectors we need */
 	start_sector = blknr / blks_per_sect;
@@ -213,6 +213,7 @@ static ulong crypt_read_xts(struct blkmap *bm, struct blkmap_crypt *bmc,
 		}
 	}
 
+	mbedtls_platform_zeroize(buf, bmc->sector_size);
 	free(buf);
 	mbedtls_aes_xts_free(&ctx);
 
@@ -305,6 +306,15 @@ static ulong blkmap_crypt_read(struct blkmap *bm, struct blkmap_slice *bms,
 	u8 *encrypted_buf;
 	ulong result;
 
+	/* XTS reads and decrypts whole encryption sectors itself */
+	if (bmc->cipher_mode == BLKMAP_CRYPT_MODE_XTS) {
+		result = crypt_read_xts(bm, bmc, blknr, blkcnt, buffer);
+		/* Check for error - result will be negative on failure */
+		if ((long)result < 0)
+			return 0;
+		return result;
+	}
+
 	/* Allocate buffer for encrypted data */
 	encrypted_buf = malloc_cache_aligned(blkcnt * src_bd->blksz);
 	if (!encrypted_buf)
@@ -326,16 +336,6 @@ static ulong blkmap_crypt_read(struct blkmap *bm, struct blkmap_slice *bms,
 	if (blknr == 0 && blkcnt >= 1) {
 		log_debug("First 32 bytes of ENCRYPTED data:\n");
 		log_debug_hex("", encrypted_buf, 32);
-	}
-
-	if (bmc->cipher_mode == BLKMAP_CRYPT_MODE_XTS) {
-		result = crypt_read_xts(bm, bmc, blknr, blkcnt, buffer);
-		/* XTS reads its own data, so free encrypted_buf early */
-		free(encrypted_buf);
-		/* Check for error - result will be negative on failure */
-		if ((long)result < 0)
-			return 0;
-		return result;
 	}
 
 	result = crypt_read_cbc(bm, bmc, blknr, blkcnt, encrypted_buf, buffer);
@@ -360,13 +360,40 @@ int blkmap_map_crypt(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
 		     bool use_essiv, const u8 *essiv_key)
 {
 	struct blkmap *bm = dev_get_plat(dev);
+	struct blk_desc *src = dev_get_uclass_plat(lblk);
+	struct blk_desc *bd = dev_get_uclass_plat(bm->blk);
 	struct blkmap_crypt *bmc;
 	int err;
 
-	if (key_size > 128)
+	if (!master_key || key_size > sizeof(bmc->master_key) ||
+	    !is_power_of_2(src->blksz) || src->blksz < 512)
 		return -EINVAL;
 
-	bmc = malloc(sizeof(*bmc));
+	/*
+	 * The decrypted data is read in blocks of the backing device. XTS
+	 * decrypts whole encryption sectors, which must be made of such
+	 * blocks; CBC has no sector size and decrypts 512-byte blocks.
+	 */
+	if (cipher_mode == BLKMAP_CRYPT_MODE_XTS ?
+	    sector_size < src->blksz || sector_size % src->blksz ||
+	    blkcnt % (sector_size / src->blksz) :
+	    src->blksz != 512 || sector_size != 512)
+		return -EINVAL;
+
+	/* The whole range must lie on the backing device */
+	if (lblknr > src->lba || payload_offset > src->lba - lblknr ||
+	    blkcnt > src->lba - lblknr - payload_offset)
+		return -EINVAL;
+
+	/* Only the first slice may give the blkmap its block size */
+	if (bd->blksz != src->blksz) {
+		if (!list_empty(&bm->slices))
+			return -EINVAL;
+		bd->blksz = src->blksz;
+		bd->log2blksz = ilog2(src->blksz);
+	}
+
+	bmc = calloc(1, sizeof(*bmc));
 	if (!bmc)
 		return -ENOMEM;
 
@@ -391,8 +418,10 @@ int blkmap_map_crypt(struct udevice *dev, lbaint_t blknr, lbaint_t blkcnt,
 	bmc->slice.destroy = blkmap_crypt_destroy;
 
 	err = blkmap_slice_add(bm, &bmc->slice);
-	if (err)
+	if (err) {
+		mbedtls_platform_zeroize(bmc, sizeof(*bmc));
 		free(bmc);
+	}
 
 	return err;
 }
