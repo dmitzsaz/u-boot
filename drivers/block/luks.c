@@ -8,7 +8,6 @@
 #include <blk.h>
 #include <blkmap.h>
 #include <dm.h>
-#include <dm/ofnode.h>
 #include <hash.h>
 #include <hexdump.h>
 #include <json.h>
@@ -651,7 +650,6 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 	enum blkmap_crypt_mode cipher_mode;
 	lbaint_t decrypted_size;
 	struct luks1_phdr *hdr;
-	struct luks2_hdr *hdr2;
 	struct blk_desc *desc;
 	struct udevice *dev;
 	uint payload_offset;
@@ -675,106 +673,18 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 	version = be16_to_cpu(*(__be16 *)(buf + LUKS_MAGIC_LEN));
 
 	if (version == LUKS_VERSION_2) {
-		/* LUKS2: Parse JSON for segment offset */
-		char *json_data;
-		u64 hdr_size, segment_offset;
-		int blocks;
-		struct abuf fdt_buf;
-		oftree tree;
-		ofnode root, segments_node, segment0_node;
-		const char *offset_str, *encryption;
+		struct luks2_segment seg;
 
-		abuf_init(&fdt_buf);
-
-		hdr2 = (struct luks2_hdr *)buf;
-		hdr_size = be64_to_cpu(hdr2->hdr_size);
-
-		/* Read full header with JSON */
-		blocks = (hdr_size + desc->blksz - 1) / desc->blksz;
-		json_data = malloc_cache_aligned(blocks * desc->blksz);
-		if (!json_data)
-			return -ENOMEM;
-
-		if (blk_read(blk, pinfo->start, blocks, json_data) != blocks) {
-			free(json_data);
-			return -EIO;
-		}
-
-		/* Convert JSON to FDT */
-		ret = json_to_fdt(json_data + 4096, &fdt_buf);
-		if (ret) {
-			log_err("Failed to convert JSON to FDT: %d\n", ret);
-			free(json_data);
-			return -EINVAL;
-		}
-
-		/* Create oftree from FDT */
-		tree = oftree_from_fdt(abuf_data(&fdt_buf));
-		if (!oftree_valid(tree)) {
-			abuf_uninit(&fdt_buf);
-			free(json_data);
-			return -EINVAL;
-		}
-
-		/* Get root node */
-		root = oftree_root(tree);
-		if (!ofnode_valid(root)) {
-			abuf_uninit(&fdt_buf);
-			free(json_data);
-			return -EINVAL;
-		}
-
-		/* Navigate to segments node */
-		segments_node = ofnode_find_subnode(root, "segments");
-		if (!ofnode_valid(segments_node)) {
-			abuf_uninit(&fdt_buf);
-			free(json_data);
-			return -EINVAL;
-		}
-
-		/* Get first segment (segment 0) */
-		segment0_node = ofnode_find_subnode(segments_node, "0");
-		if (!ofnode_valid(segment0_node)) {
-			abuf_uninit(&fdt_buf);
-			free(json_data);
-			return -EINVAL;
-		}
-
-		/* Get offset (string in LUKS2 JSON) */
-		offset_str = ofnode_read_string(segment0_node, "offset");
-		if (!offset_str) {
-			abuf_uninit(&fdt_buf);
-			free(json_data);
-			return -EINVAL;
-		}
-		segment_offset = simple_strtoull(offset_str, NULL, 10);
+		ret = luks2_get_segment(blk, pinfo, &seg);
+		if (ret)
+			return ret;
 
 		/* Convert byte offset to sectors */
-		payload_offset = segment_offset / desc->blksz;
-
-		/* Parse cipher mode from encryption string */
-		encryption = ofnode_read_string(segment0_node, "encryption");
-		if (encryption) {
-			use_essiv = strstr(encryption, "essiv");
-			/* Check if XTS mode is used */
-			if (strstr(encryption, "xts"))
-				cipher_mode = BLKMAP_CRYPT_MODE_XTS;
-			else
-				cipher_mode = BLKMAP_CRYPT_MODE_CBC;
-		} else {
-			use_essiv = false;
-			cipher_mode = BLKMAP_CRYPT_MODE_CBC;
-		}
-
-		/* Read sector_size if present */
-		if (ofnode_read_u32(segment0_node, "sector_size", &sector_size)) {
-			/* If not found, default to 512 */
-			sector_size = 512;
-		}
-		log_debug("LUKS2: sector_size=%u\n", sector_size);
-
-		abuf_uninit(&fdt_buf);
-		free(json_data);
+		payload_offset = seg.offset / desc->blksz;
+		use_essiv = seg.essiv;
+		cipher_mode = seg.xts ? BLKMAP_CRYPT_MODE_XTS :
+			BLKMAP_CRYPT_MODE_CBC;
+		sector_size = seg.sector_size;
 	} else {
 		/* LUKS1 */
 		hdr = (struct luks1_phdr *)buf;

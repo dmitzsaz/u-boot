@@ -62,4 +62,30 @@ int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
 		 const u8 *pass, size_t pass_len, bool pre_derived,
 		 u8 *master_key, uint *key_sizep);
 
+/**
+ * struct luks2_segment - Encrypted data segment of a LUKS2 volume
+ *
+ * @offset: Byte offset of the data from the start of the partition
+ * @sector_size: Encryption sector size in bytes
+ * @xts: true for AES-XTS, false for AES-CBC
+ * @essiv: true if CBC uses ESSIV
+ */
+struct luks2_segment {
+	u64 offset;
+	u32 sector_size;
+	bool xts;
+	bool essiv;
+};
+
+/**
+ * luks2_get_segment() - Read the data segment (segment 0) of a LUKS2 volume
+ *
+ * @blk: Block device
+ * @pinfo: Partition information
+ * @seg: Returns the segment
+ * Return: 0 on success, -ve on error
+ */
+int luks2_get_segment(struct udevice *blk, struct disk_partition *pinfo,
+		      struct luks2_segment *seg);
+
 #endif /* __LUKS_INTERNAL_H__ */
