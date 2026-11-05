@@ -34,6 +34,8 @@
 #define DART_T8020_TTBR_BASE		0x0200
 #define  DART_T8020_TTBR_VALID			BIT(31)
 
+#define DART_T8110_PARAMS3		0x0008
+#define  DART_T8110_PARAMS3_VA_WIDTH		GENMASK(21, 16)
 #define DART_T8110_PARAMS4		0x000c
 #define  DART_T8110_PARAMS4_NSID_MASK		(0x1ff << 0)
 #define DART_T8110_TLB_CMD		0x0080
@@ -49,6 +51,7 @@
 #define  DART_T8110_PROTECT_TTBR_TCR		BIT(0)
 #define DART_T8110_SID_ENABLE_BASE	0x0c00
 #define DART_T8110_TCR_BASE		0x1000
+#define  DART_T8110_TCR_FOUR_LEVEL		BIT(3)
 #define  DART_T8110_TCR_BYPASS_DAPF		BIT(2)
 #define  DART_T8110_TCR_BYPASS_DART		BIT(1)
 #define  DART_T8110_TCR_TRANSLATE_ENABLE	BIT(0)
@@ -68,6 +71,7 @@
 #define DART_PAGE_MASK		(DART_PAGE_SIZE - 1)
 
 #define DART_L1_TABLE		0x3
+#define DART_T8110_TABLE	BIT(0)
 #define DART_L2_INVAL		0
 #define DART_L2_VALID		BIT(0)
 #define DART_L2_FULL_PAGE	BIT(1)
@@ -76,7 +80,7 @@
 
 struct apple_dart_priv {
 	void *base;
-	u64 *l1, *l2;
+	u64 *l0, *l1, *l2;
 	int bypass, shift;
 	/* Leave bypass in place at removal: a coprocessor still uses it. */
 	bool retain_bypass;
@@ -91,7 +95,9 @@ struct apple_dart_priv {
 	int sid_enable_base;
 	int tcr_base;
 	u32 tcr_translate_enable;
+	u32 tcr_four_level;
 	u32 tcr_bypass;
+	u64 table_valid;
 	int ttbr_base;
 	u32 ttbr_valid;
 	void (*flush_tlb)(struct apple_dart_priv *priv);
@@ -191,7 +197,7 @@ static int apple_dart_probe(struct udevice *dev)
 	phys_addr_t l2;
 	int ntte, nl1, nl2;
 	int ret, sid, i;
-	u32 params2, params4;
+	u32 params2, params3, params4;
 
 	priv->base = dev_read_addr_ptr(dev);
 	if (!priv->base)
@@ -209,8 +215,16 @@ static int apple_dart_probe(struct udevice *dev)
 			return -EPERM;
 		}
 
+		params3 = readl(priv->base + DART_T8110_PARAMS3);
 		params4 = readl(priv->base + DART_T8110_PARAMS4);
 		priv->nsid = params4 & DART_T8110_PARAMS4_NSID_MASK;
+		/*
+		 * With more than 36 address bits the tables have a third
+		 * level, as in Linux's io-pgtable-dart. U-Boot's addresses
+		 * stay below 4 GiB and use its first entry only.
+		 */
+		if (FIELD_GET(DART_T8110_PARAMS3_VA_WIDTH, params3) > 36)
+			priv->tcr_four_level = DART_T8110_TCR_FOUR_LEVEL;
 		priv->nttbr = 1;
 		priv->sid_enable_base = DART_T8110_SID_ENABLE_BASE;
 		priv->tcr_base = DART_T8110_TCR_BASE;
@@ -219,6 +233,7 @@ static int apple_dart_probe(struct udevice *dev)
 		    DART_T8110_TCR_BYPASS_DAPF | DART_T8110_TCR_BYPASS_DART;
 		priv->ttbr_base = DART_T8110_TTBR_BASE;
 		priv->ttbr_valid = DART_T8110_TTBR_VALID;
+		priv->table_valid = DART_T8110_TABLE;
 		priv->flush_tlb = apple_dart_t8110_flush_tlb;
 	} else {
 		priv->nsid = 16;
@@ -230,6 +245,7 @@ static int apple_dart_probe(struct udevice *dev)
 		    DART_T8020_TCR_BYPASS_DAPF | DART_T8020_TCR_BYPASS_DART;
 		priv->ttbr_base = DART_T8020_TTBR_BASE;
 		priv->ttbr_valid = DART_T8020_TTBR_VALID;
+		priv->table_valid = DART_L1_TABLE;
 		priv->flush_tlb = apple_dart_t8020_flush_tlb;
 	}
 
@@ -259,14 +275,24 @@ static int apple_dart_probe(struct udevice *dev)
 	}
 	priv->flush_tlb(priv);
 
+	/*
+	 * Some DARTs advertise bypass, but their TCR bypass bits do not
+	 * stick (the T8142 PCIe DARTs); those need translation as well.
+	 */
 	params2 = readl(priv->base + DART_PARAMS2);
 	if (params2 & DART_PARAMS2_BYPASS_SUPPORT) {
 		for (sid = 0; sid < priv->nsid; sid++) {
 			writel(priv->tcr_bypass,
 			       priv->base + DART_TCR(priv, sid));
 		}
-		priv->bypass = 1;
-		return 0;
+		if ((readl(priv->base + DART_TCR(priv, 0)) & priv->tcr_bypass) ==
+		    priv->tcr_bypass) {
+			priv->bypass = 1;
+			return 0;
+		}
+		for (sid = 0; sid < priv->nsid; sid++)
+			writel(0, priv->base + DART_TCR(priv, sid));
+		dev_dbg(dev, "bypass not available, translating\n");
 	}
 
 	ntte = DIV_ROUND_UP(priv->dvaend, DART_PAGE_SIZE);
@@ -282,16 +308,28 @@ static int apple_dart_probe(struct udevice *dev)
 	memset(priv->l1, 0, nl1 * DART_PAGE_SIZE);
 	l2 = (phys_addr_t)priv->l2;
 	for (i = 0; i < nl2; i++) {
-		priv->l1[i] = (l2 >> priv->shift) | DART_L1_TABLE;
+		priv->l1[i] = (l2 >> priv->shift) | priv->table_valid;
 		l2 += DART_PAGE_SIZE;
 	}
 	flush_dcache_range((unsigned long)priv->l1,
 			   (unsigned long)priv->l1 + nl1 * DART_PAGE_SIZE);
 
+	if (priv->tcr_four_level) {
+		/* The first entry covers 64 GiB, which holds all L1 tables */
+		priv->l0 = memalign(DART_PAGE_SIZE, DART_PAGE_SIZE);
+		if (!priv->l0 || nl1 != 1)
+			return -ENOMEM;
+		memset(priv->l0, 0, DART_PAGE_SIZE);
+		priv->l0[0] = ((phys_addr_t)priv->l1 >> priv->shift) |
+			      priv->table_valid;
+		flush_dcache_range((unsigned long)priv->l0,
+				   (unsigned long)priv->l0 + DART_PAGE_SIZE);
+	}
+
 	/* Install page tables. */
 	for (sid = 0; sid < priv->nsid; sid++) {
-		addr = (phys_addr_t)priv->l1;
-		for (i = 0; i < nl1; i++) {
+		addr = priv->l0 ? (phys_addr_t)priv->l0 : (phys_addr_t)priv->l1;
+		for (i = 0; i < (priv->l0 ? 1 : nl1); i++) {
 			writel(addr >> DART_TTBR_SHIFT | priv->ttbr_valid,
 			       priv->base + DART_TTBR(priv, sid, i));
 			addr += DART_PAGE_SIZE;
@@ -305,7 +343,7 @@ static int apple_dart_probe(struct udevice *dev)
 
 	/* Enable translations. */
 	for (sid = 0; sid < priv->nsid; sid++) {
-		writel(priv->tcr_translate_enable,
+		writel(priv->tcr_translate_enable | priv->tcr_four_level,
 		       priv->base + DART_TCR(priv, sid));
 	}
 
