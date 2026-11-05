@@ -1514,8 +1514,8 @@ static void apple_efi_late_init(bool start_keyboard)
 	 */
 	if (!strcmp(env_get("bootcmd") ?: "", CONFIG_BOOTCOMMAND))
 		env_set("bootcmd", "run aurora_boot");
-	if (!strcmp(env_get("boot_targets") ?: "", "nvme usb"))
-		env_set("boot_targets", "nvme");
+	if (!strcmp(env_get("boot_targets") ?: "", "nvme mmc usb"))
+		env_set("boot_targets", "nvme mmc");
 	if (!strcmp(env_get("preboot") ?: "", "usb start"))
 		env_set("preboot", "");
 	/* EFI ConIn uses the active stdin; keep serial input available. */
