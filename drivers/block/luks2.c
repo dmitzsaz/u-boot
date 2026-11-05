@@ -12,8 +12,10 @@
 #include <dm.h>
 #include <hash.h>
 #include <json.h>
+#include <lmb.h>
 #include <log.h>
 #include <luks.h>
+#include <mapmem.h>
 #include <memalign.h>
 #include <part.h>
 #include <uboot_aes.h>
@@ -677,6 +679,75 @@ out:
 	return ret;
 }
 
+/*
+ * Argon2 needs all of its memory cost at once, 1 GiB with cryptsetup's
+ * defaults, far beyond the malloc() pool. Take it from free RAM through LMB
+ * for the length of one key derivation.
+ */
+static int luks2_argon2_alloc(u8 **memory, size_t size)
+{
+	phys_addr_t addr;
+
+	*memory = NULL;
+	if (lmb_alloc_mem(LMB_MEM_ALLOC_ANY, SZ_4K, &addr, size, LMB_NONE)) {
+		log_debug("LUKS2: no free memory for Argon2 (%zx bytes)\n",
+			  size);
+		return ARGON2_MEMORY_ALLOCATION_ERROR;
+	}
+	*memory = map_sysmem(addr, size);
+
+	return ARGON2_OK;
+}
+
+/* Argon2 has already wiped the memory */
+static void luks2_argon2_free(u8 *memory, size_t size)
+{
+	phys_addr_t addr = map_to_sysmem(memory);
+
+	unmap_sysmem(memory);
+	lmb_free(addr, size, LMB_NONE);
+}
+
+/**
+ * luks2_argon2() - Derive a key with Argon2i or Argon2id
+ *
+ * @type: LUKS2_KDF_ARGON2I or LUKS2_KDF_ARGON2ID
+ * @time: Time cost (passes)
+ * @memory: Memory cost in KiB
+ * @cpus: Parallelism (lanes); computed in a single thread
+ * @pass: Passphrase or key
+ * @pass_len: Length of @pass
+ * @salt: Salt
+ * @salt_len: Length of @salt
+ * @out: Output buffer
+ * @out_len: Number of bytes to derive
+ * Return: ARGON2_OK (0) on success, other ARGON2_... code on error
+ */
+static int luks2_argon2(enum luks2_kdf_type type, u32 time, u32 memory,
+			u32 cpus, const u8 *pass, size_t pass_len,
+			const u8 *salt, int salt_len, u8 *out, uint out_len)
+{
+	argon2_context ctx = {
+		.out = out,
+		.outlen = out_len,
+		.pwd = (u8 *)pass,
+		.pwdlen = pass_len,
+		.salt = (u8 *)salt,
+		.saltlen = salt_len,
+		.t_cost = time,
+		.m_cost = memory,
+		.lanes = cpus,
+		.threads = 1,
+		.version = ARGON2_VERSION_13,
+		.allocate_cbk = luks2_argon2_alloc,
+		.free_cbk = luks2_argon2_free,
+		.flags = ARGON2_DEFAULT_FLAGS,
+	};
+
+	return argon2_ctx(&ctx, type == LUKS2_KDF_ARGON2I ? Argon2_i :
+			  Argon2_id);
+}
+
 /**
  * decrypt_km_xts() - Decrypt key material using XTS mode
  *
@@ -887,19 +958,18 @@ static int try_keyslot_argon2(struct udevice *blk, struct disk_partition *pinfo,
 	u8 derived_key[128];
 	u8 *split_key = NULL, *km = NULL;
 
-	log_debug("LUKS2: trying keyslot with Argon2id (t=%u, m=%u, p=%u)\n",
+	log_debug("LUKS2: trying keyslot with Argon2 (t=%u, m=%u, p=%u)\n",
 		  ks->kdf.time, ks->kdf.memory, ks->kdf.cpus);
 
-	/* Derive key from passphrase using Argon2id */
+	/* Derive key from passphrase using Argon2 */
 	log_debug("LUKS2 Argon2: pass_len=%zu, t=%u, m=%u, p=%u, saltlen=%d, keylen=%u\n",
 		  pass_len, ks->kdf.time, ks->kdf.memory, ks->kdf.cpus,
 		  ks->kdf.salt_len, ks->area.key_size);
-	ret = argon2id_hash_raw(ks->kdf.time, ks->kdf.memory, ks->kdf.cpus,
-				pass, pass_len, ks->kdf.salt,
-				ks->kdf.salt_len, derived_key,
-				ks->area.key_size);
+	ret = luks2_argon2(ks->kdf.type, ks->kdf.time, ks->kdf.memory,
+			   ks->kdf.cpus, pass, pass_len, ks->kdf.salt,
+			   ks->kdf.salt_len, derived_key, ks->area.key_size);
 	if (ret) {
-		log_err("Argon2id failed: %s (code=%d)\n",
+		log_err("Argon2 failed: %s (code=%d)\n",
 			argon2_error_message(ret), ret);
 		if (ret == ARGON2_MEMORY_ALLOCATION_ERROR)
 			return -ENOMEM;
@@ -1008,10 +1078,10 @@ static int verify_master_key(const struct luks2_digest *digest,
 		/* Argon2 digest verification */
 		log_debug("LUKS2: verifying with Argon2 (t=%u, m=%u, p=%u)\n",
 			  digest->time, digest->memory, digest->cpus);
-		ret = argon2id_hash_raw(digest->time, digest->memory,
-					digest->cpus, cand_key, key_size,
-					digest->salt, digest->salt_len,
-					calculated_digest, digest->digest_len);
+		ret = luks2_argon2(digest->type, digest->time, digest->memory,
+				   digest->cpus, cand_key, key_size,
+				   digest->salt, digest->salt_len,
+				   calculated_digest, digest->digest_len);
 		if (ret) {
 			log_debug("Argon2 digest hash failed: %s\n",
 				  argon2_error_message(ret));
