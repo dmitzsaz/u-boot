@@ -69,13 +69,24 @@ static bool rtkit_helper_uses_dram(struct udevice *dev)
 		 device_is_compatible(dev, "apple,t6041-rtk-helper-asc4")));
 }
 
+/*
+ * The T8142 MTP cannot be started again once stopped. U-Boot only uses it
+ * when it hands the running session on to the OS.
+ */
+static bool rtkit_helper_t8142_handoff(struct udevice *dev)
+{
+	return IS_ENABLED(CONFIG_APPLE_MTP_KEYB_T8142_HANDOFF) &&
+	       device_is_compatible(dev, "apple,t8142-rtk-helper-asc4");
+}
+
 /* J713 and J614s Linux consume the initialized session without owning its RTKit epoch. */
 static bool rtkit_helper_j713_handoff(struct udevice *dev)
 {
 	return (of_machine_is_compatible("apple,j713") &&
 		device_is_compatible(dev, "apple,t8132-rtk-helper-asc4")) ||
 	       (of_machine_is_compatible("apple,j614s") &&
-		device_is_compatible(dev, "apple,t6041-rtk-helper-asc4"));
+		device_is_compatible(dev, "apple,t6041-rtk-helper-asc4")) ||
+	       rtkit_helper_t8142_handoff(dev);
 }
 
 static void rtkit_helper_read_dma_window(struct udevice *dev)
@@ -207,6 +218,8 @@ bool apple_rtkit_helper_allowed(ofnode node)
 	if (ofnode_device_is_compatible(node, "apple,t6041-rtk-helper-asc4"))
 		return IS_ENABLED(CONFIG_APPLE_MTP_KEYB) &&
 		       of_machine_is_compatible("apple,j614s");
+	if (ofnode_device_is_compatible(node, "apple,t8142-rtk-helper-asc4"))
+		return IS_ENABLED(CONFIG_APPLE_MTP_KEYB_T8142_HANDOFF);
 
 	return !ofnode_device_is_compatible(node, "apple,t8140-rtk-helper-asc4") ||
 	       IS_ENABLED(CONFIG_APPLE_MTP_KEYB);
@@ -233,6 +246,13 @@ static int rtkit_helper_probe(struct udevice *dev)
 
 	if (rtkit_helper_uses_dram(dev) || rtkit_helper_j713_handoff(dev))
 		rtkit_helper_read_dma_window(dev);
+	/*
+	 * The T8142 MTP DART's apple,dma-range is the OS's translated IOVA
+	 * window. The session runs with the DART in bypass, on physical
+	 * addresses, so it does not bound the buffers.
+	 */
+	if (rtkit_helper_t8142_handoff(dev))
+		priv->dma_start = priv->dma_end = 0;
 
 	if (of_machine_is_compatible("apple,j614s") &&
 	    device_is_compatible(dev, "apple,t6041-rtk-helper-asc4")) {
@@ -253,10 +273,14 @@ static int rtkit_helper_probe(struct udevice *dev)
 	}
 
 	/* Stable kernels do not service logging after the OS boundary. */
-	ret = rtkit_helper_j713_handoff(dev) ?
-		apple_rtkit_boot_with_sys_ep_mask(priv->rtk,
-					       ~(u32)(BIT(2) | BIT(3) | BIT(10))) :
-		apple_rtkit_boot(priv->rtk);
+	if (rtkit_helper_t8142_handoff(dev))
+		ret = apple_rtkit_boot_with_options(priv->rtk,
+			~(u32)(BIT(2) | BIT(3) | BIT(10)), APPLE_RTKIT_BOOT_AP_FIRST);
+	else if (rtkit_helper_j713_handoff(dev))
+		ret = apple_rtkit_boot_with_sys_ep_mask(priv->rtk,
+							~(u32)(BIT(2) | BIT(3) | BIT(10)));
+	else
+		ret = apple_rtkit_boot(priv->rtk);
 	if (ret < 0) {
 		printf("%s: Helper apple_rtkit_boot returned: %d\n", __func__, ret);
 		goto err_stop;

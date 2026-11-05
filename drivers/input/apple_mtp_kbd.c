@@ -415,8 +415,7 @@ static int get_rtkit_helper(struct udevice *dev)
 		return ret;
 
 	of_mtp = ofnode_get_by_phandle(phandle);
-	if (of_machine_is_compatible("apple,j713") ||
-	    of_machine_is_compatible("apple,j614s")) {
+	if (priv->j713) {
 		/* Never retry an unprepared or failed retained coprocessor boot. */
 		ret = uclass_find_device_by_ofnode(UCLASS_MISC, of_mtp, &priv->helper);
 		if (ret)
@@ -436,18 +435,27 @@ static int apple_mtp_kbd_probe(struct udevice *dev)
 	struct keyboard_priv *uc_priv = dev_get_uclass_priv(dev);
 	struct stdio_dev *sdev = &uc_priv->sdev;
 	struct input_config *input = &uc_priv->input;
-	int ret;
-	u32 rx_irq;
+	ofnode of_helper;
+	u32 rx_irq, helper;
 	fdt_addr_t reg;
+	int ret;
 
+	ret = dev_read_u32(dev, "apple,helper-cpu", &helper);
+	if (ret < 0)
+		return ret;
+	of_helper = ofnode_get_by_phandle(helper);
 	/*
-	 * J813 cannot restart MTP after U-Boot shuts it down. J713 retains its
-	 * running helper and replays discovery packets to Linux at OS handoff.
+	 * The T8142 MTP cannot be restarted after U-Boot shuts it down; it is
+	 * left to the OS unless U-Boot hands its session on. J713 and J614s,
+	 * and T8142 with that handoff, retain the running helper and replay
+	 * discovery packets to Linux at OS handoff.
 	 */
-	if (of_machine_is_compatible("apple,j813"))
+	if (!apple_rtkit_helper_allowed(of_helper))
 		return -ENODEV;
 	priv->j713 = of_machine_is_compatible("apple,j713") ||
-		     of_machine_is_compatible("apple,j614s");
+		     of_machine_is_compatible("apple,j614s") ||
+		     ofnode_device_is_compatible(of_helper,
+						 "apple,t8142-rtk-helper-asc4");
 	if (priv->j713) {
 		ret = get_rtkit_helper(dev);
 		if (ret)
@@ -514,9 +522,7 @@ static int apple_mtp_kbd_probe(struct udevice *dev)
 	 * Discovery framing is independent of the optional STM identity service.
 	 * Preserve every INIT packet for Linux, including STM and trackpad.
 	 */
-	priv->announce = dev_read_bool(dev, "apple,no-stm") ||
-			 (of_machine_is_compatible("apple,j713") ||
-			  of_machine_is_compatible("apple,j614s"));
+	priv->announce = dev_read_bool(dev, "apple,no-stm") || priv->j713;
 	if (priv->announce) {
 		priv->pkt = malloc(DCHID_MAX_PKT);
 		if (!priv->pkt) {

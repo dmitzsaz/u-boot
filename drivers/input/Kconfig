@@ -81,6 +81,22 @@ config APPLE_MTP_KEYB
 	  rtkit-helper support for adopting it; older kernels lose the
 	  internal keyboard and trackpad after U-Boot has used them.
 
+config APPLE_MTP_KEYB_T8142_HANDOFF
+	bool "Use the T8142 (M5) built-in keyboard and hand it to the OS"
+	depends on APPLE_MTP_KEYB
+	help
+	  The T8142 MTP coprocessor, which runs the built-in keyboard and
+	  trackpad, cannot be started again once it has been stopped. By
+	  default U-Boot leaves it alone and the OS starts it.
+
+	  With this option U-Boot starts the MTP, uses the built-in keyboard
+	  and hands the running session to the OS, as on J713: the OS device
+	  tree gets apple,rtkit-handoff = "mtp-live-v1", the buffer inventory
+	  in apple,rtkit-buffers and no-map reservations for the buffers. The
+	  OS must adopt that session; an OS that starts the MTP itself gets no
+	  keyboard or trackpad. If the handoff cannot be described, the MTP
+	  node is disabled and the boot continues.
+
 config CROS_EC_KEYB
 	bool "Enable Chrome OS EC keyboard support"
 	depends on INPUT && CROS_EC
