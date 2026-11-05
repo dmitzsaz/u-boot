@@ -13,7 +13,8 @@ Synopsis
 
     luks detect <interface> <dev[:part]>
     luks info <interface> <dev[:part]>
-    luks unlock <interface> <dev[:part]> <passphrase>
+    luks unlock <interface> <dev[:part]> [<passphrase>]
+    luks close <interface> <dev[:part]>
 
 Description
 -----------
@@ -127,10 +128,19 @@ dev[:part]
 passphrase
     The passphrase to unlock the LUKS partition. Note that the passphrase is
     passed as a command-line argument and may be visible in command history.
-    Consider using environment variables to minimize exposure.
+    If it is omitted, the command asks for it on the console without echoing
+    it; Ctrl-C cancels. The passphrase and the master key are wiped from
+    memory when the command returns.
 
-The unlocked data remains accessible until U-Boot exits or the blkmap device
-is explicitly destroyed.
+The unlocked data remains accessible as blkmap ``luks-<interface>-<dev[:part]>``
+until it is closed, the blkmap device is destroyed or an OS is booted. In each
+case the master key is wiped.
+
+luks close
+~~~~~~~~~~
+
+Remove the blkmap device of a partition unlocked with ``luks unlock`` and wipe
+its master key.
 
 Examples
 --------
