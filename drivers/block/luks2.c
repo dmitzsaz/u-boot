@@ -20,14 +20,31 @@
 #include <asm/unaligned.h>
 #include <linux/libfdt.h>
 #include <linux/errno.h>
+#include <linux/kernel.h>
+#include <linux/log2.h>
+#include <linux/sizes.h>
 #include <linux/string.h>
 #include <mbedtls/aes.h>
 #include <mbedtls/base64.h>
+#include <mbedtls/constant_time.h>
 #include <mbedtls/md.h>
 #include <mbedtls/pkcs5.h>
 #include <u-boot/sha256.h>
 #include <argon2.h>
 #include "luks_internal.h"
+
+/* The binary header ahead of the JSON area */
+#define LUKS2_HDR_BIN_SIZE	4096
+
+/* Sizes cryptsetup uses for binary header plus JSON area: 16 KiB to 4 MiB */
+#define LUKS2_HDR_MIN_SIZE	SZ_16K
+#define LUKS2_HDR_MAX_SIZE	SZ_4M
+
+/* Upper bound of a keyslot's key material (key size times AF stripes) */
+#define LUKS2_KM_MAX_SIZE	SZ_16M
+
+/* Argon2 memory cost limit of cryptsetup, in KiB */
+#define LUKS2_ARGON2_MAX_MEMORY	(4U * 1024 * 1024)
 
 /**
  * enum luks2_kdf_type - LUKS2 KDF type
@@ -78,9 +95,11 @@ struct luks2_digest {
  * @time: Argon2 time cost parameter (valid if type == LUKS2_KDF_ARGON2*)
  * @memory: Argon2 memory cost parameter in KB (type == LUKS2_KDF_ARGON2*)
  * @cpus: Argon2 parallelism/lanes parameter (type == LUKS2_KDF_ARGON2*)
+ * @hash: PBKDF2 hash algorithm name (valid if type == LUKS2_KDF_PBKDF2)
  */
 struct luks2_kdf {
 	enum luks2_kdf_type type;
+	const char *hash;
 	u8 salt[LUKS_SALTSIZE];
 	int salt_len;
 	u32 iters;
@@ -220,6 +239,156 @@ static int luks2_read_u32(const void *fdt, int node, const char *name,
 }
 
 /**
+ * luks2_read_u64() - Read a number property that LUKS2 stores as a string
+ *
+ * Offsets and sizes are decimal strings in the LUKS2 JSON.
+ *
+ * @fdt: Metadata tree
+ * @node: Node offset
+ * @name: Property name
+ * @valp: Returns the value
+ * Return: 0 if OK, -EINVAL if absent or not a plain decimal number
+ */
+static int luks2_read_u64(const void *fdt, int node, const char *name,
+			  u64 *valp)
+{
+	const char *str = luks2_read_string(fdt, node, name);
+	char *end;
+
+	/* At most 19 digits, so that the value cannot overflow */
+	if (!str || *str < '0' || *str > '9' || strlen(str) > 19)
+		return -EINVAL;
+	*valp = simple_strtoull(str, &end, 10);
+	if (*end)
+		return -EINVAL;
+
+	return 0;
+}
+
+/**
+ * luks2_read_metadata() - Read and check the primary LUKS2 header
+ *
+ * The checksum covers the binary header, with its checksum field zeroed,
+ * and the JSON area. The header is only read: a damaged primary header is
+ * refused, never repaired from the secondary copy.
+ *
+ * @blk: Block device
+ * @pinfo: Partition information
+ * @fdt_buf: Returns the JSON metadata converted to a flat tree; the caller
+ *	must uninit it
+ * Return: 0 on success, -EBADMSG on a checksum mismatch, other -ve on error
+ */
+static int luks2_read_metadata(struct udevice *blk, struct disk_partition *pinfo,
+			       struct abuf *fdt_buf)
+{
+	struct blk_desc *desc = dev_get_uclass_plat(blk);
+	u8 expected[FIELD_SIZEOF(struct luks2_hdr, csum)];
+	u8 actual[sizeof(expected)];
+	struct luks2_hdr *hdr;
+	int csum_len, ret;
+	lbaint_t blocks;
+	u64 hdr_size;
+	char *data;
+
+	abuf_init(fdt_buf);
+	if (!desc->blksz || desc->blksz > LUKS2_HDR_BIN_SIZE ||
+	    LUKS2_HDR_BIN_SIZE % desc->blksz)
+		return -EINVAL;
+	blocks = LUKS2_HDR_BIN_SIZE / desc->blksz;
+	if (pinfo->size < blocks)
+		return -EINVAL;
+
+	hdr = malloc_cache_aligned(LUKS2_HDR_BIN_SIZE);
+	if (!hdr)
+		return -ENOMEM;
+	if (blk_read(blk, pinfo->start, blocks, hdr) != blocks) {
+		free(hdr);
+		return -EIO;
+	}
+	hdr_size = be64_to_cpu(hdr->hdr_size);
+	if (memcmp(hdr->magic, LUKS_MAGIC, LUKS_MAGIC_LEN) ||
+	    be16_to_cpu(hdr->version) != LUKS_VERSION_2 ||
+	    hdr->hdr_offset || hdr_size < LUKS2_HDR_MIN_SIZE ||
+	    hdr_size > LUKS2_HDR_MAX_SIZE || !is_power_of_2(hdr_size) ||
+	    hdr_size / desc->blksz > pinfo->size ||
+	    !memchr(hdr->csum_alg, '\0', sizeof(hdr->csum_alg))) {
+		log_debug("LUKS2: invalid binary header\n");
+		free(hdr);
+		return -EINVAL;
+	}
+	free(hdr);
+
+	blocks = hdr_size / desc->blksz;
+	data = malloc_cache_aligned(hdr_size);
+	if (!data)
+		return -ENOMEM;
+	if (blk_read(blk, pinfo->start, blocks, data) != blocks) {
+		ret = -EIO;
+		goto out;
+	}
+
+	/* Check the header that was just read, not the first copy */
+	hdr = (struct luks2_hdr *)data;
+	if (be64_to_cpu(hdr->hdr_size) != hdr_size ||
+	    !memchr(hdr->csum_alg, '\0', sizeof(hdr->csum_alg))) {
+		ret = -EINVAL;
+		goto out;
+	}
+	memcpy(expected, hdr->csum, sizeof(expected));
+	memset(hdr->csum, '\0', sizeof(hdr->csum));
+	csum_len = sizeof(actual);
+	ret = hash_block(hdr->csum_alg, data, hdr_size, actual, &csum_len);
+	if (ret) {
+		log_debug("LUKS2: checksum %s not available\n", hdr->csum_alg);
+		ret = -ENOTSUPP;
+		goto out;
+	}
+	if (mbedtls_ct_memcmp(expected, actual, csum_len)) {
+		log_debug("LUKS2: header checksum mismatch\n");
+		ret = -EBADMSG;
+		goto out;
+	}
+
+	/* The JSON text must end inside its area */
+	if (!memchr(data + LUKS2_HDR_BIN_SIZE, '\0',
+		    hdr_size - LUKS2_HDR_BIN_SIZE)) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (json_to_fdt(data + LUKS2_HDR_BIN_SIZE, fdt_buf)) {
+		log_err("Failed to convert JSON to FDT\n");
+		ret = -EINVAL;
+	}
+
+out:
+	memset(data, '\0', hdr_size);
+	free(data);
+
+	return ret;
+}
+
+/**
+ * luks2_find_digest() - Find the digest that verifies the data segment's key
+ *
+ * @fdt: Metadata tree
+ * Return: node offset of the digest bound to segment "0", -ve if none
+ */
+static int luks2_find_digest(const void *fdt)
+{
+	int digests, node;
+
+	digests = fdt_subnode_offset(fdt, 0, "digests");
+	if (digests < 0)
+		return digests;
+	fdt_for_each_subnode(node, fdt, digests) {
+		if (fdt_stringlist_search(fdt, node, "segments", "0") >= 0)
+			return node;
+	}
+
+	return -ENOENT;
+}
+
+/**
  * read_digest_info() - Read LUKS2 digest information from the metadata
  *
  * @fdt: Metadata tree
@@ -292,6 +461,11 @@ static int read_digest_info(const void *fdt, int digest_node,
 	if (digest->digest_len <= 0)
 		return -EINVAL;
 
+	if (digest->type == LUKS2_KDF_PBKDF2 ? !digest->iters :
+	    !digest->time || !digest->cpus ||
+	    digest->memory > LUKS2_ARGON2_MAX_MEMORY)
+		return -EINVAL;
+
 	return 0;
 }
 
@@ -301,14 +475,12 @@ static int read_digest_info(const void *fdt, int digest_node,
  * @fdt: Metadata tree
  * @keyslot_node: Node of the keyslot (e.g., keyslot "0")
  * @keyslot: Pointer to keyslot structure to fill
- * @hash_name: Hash name to use for AF (from digest)
  * Return: 0 on success, -ve on error
  */
 static int read_keyslot_info(const void *fdt, int keyslot_node,
-			     struct luks2_keyslot *keyslot,
-			     const char *hash_name)
+			     struct luks2_keyslot *keyslot)
 {
-	const char *salt_b64, *offset_str, *size_str;
+	const char *salt_b64, *offset_str;
 	int kdf_node, af_node, area_node;
 	int ret;
 
@@ -355,15 +527,19 @@ static int read_keyslot_info(const void *fdt, int keyslot_node,
 
 	/* Read KDF-specific parameters */
 	if (keyslot->kdf.type == LUKS2_KDF_PBKDF2) {
-		if (luks2_read_u32(fdt, kdf_node, "iterations",
-				   &keyslot->kdf.iters))
+		keyslot->kdf.hash = luks2_read_string(fdt, kdf_node, "hash");
+		if (!keyslot->kdf.hash ||
+		    luks2_read_u32(fdt, kdf_node, "iterations",
+				   &keyslot->kdf.iters) || !keyslot->kdf.iters)
 			return -EINVAL;
 	} else {
 		/* Argon2 */
 		if (luks2_read_u32(fdt, kdf_node, "time", &keyslot->kdf.time) ||
 		    luks2_read_u32(fdt, kdf_node, "memory",
 				   &keyslot->kdf.memory) ||
-		    luks2_read_u32(fdt, kdf_node, "cpus", &keyslot->kdf.cpus))
+		    luks2_read_u32(fdt, kdf_node, "cpus", &keyslot->kdf.cpus) ||
+		    !keyslot->kdf.time || !keyslot->kdf.cpus ||
+		    keyslot->kdf.memory > LUKS2_ARGON2_MAX_MEMORY)
 			return -EINVAL;
 	}
 
@@ -372,25 +548,27 @@ static int read_keyslot_info(const void *fdt, int keyslot_node,
 	if (af_node < 0)
 		return -EINVAL;
 
-	if (luks2_read_u32(fdt, af_node, "stripes", &keyslot->af.stripes))
-		keyslot->af.stripes = 4000;  /* Default */
-	keyslot->af.hash = hash_name;
+	if (strcmp(luks2_read_string(fdt, af_node, "type") ?: "", "luks1"))
+		return -ENOTSUPP;
+	if (luks2_read_u32(fdt, af_node, "stripes", &keyslot->af.stripes) ||
+	    !keyslot->af.stripes)
+		return -EINVAL;
+	keyslot->af.hash = luks2_read_string(fdt, af_node, "hash");
+	if (!keyslot->af.hash)
+		return -EINVAL;
 
 	/* Navigate to and read area node */
 	area_node = fdt_subnode_offset(fdt, keyslot_node, "area");
 	if (area_node < 0)
 		return -EINVAL;
 
-	/* Read offset and size (strings in LUKS2 JSON) */
-	offset_str = luks2_read_string(fdt, area_node, "offset");
-	if (!offset_str)
-		return -EINVAL;
-	keyslot->area.offset = simple_strtoull(offset_str, NULL, 10);
+	if (strcmp(luks2_read_string(fdt, area_node, "type") ?: "", "raw"))
+		return -ENOTSUPP;
 
-	size_str = luks2_read_string(fdt, area_node, "size");
-	if (!size_str)
+	/* Read offset and size (strings in LUKS2 JSON) */
+	if (luks2_read_u64(fdt, area_node, "offset", &keyslot->area.offset) ||
+	    luks2_read_u64(fdt, area_node, "size", &keyslot->area.size))
 		return -EINVAL;
-	keyslot->area.size = simple_strtoull(size_str, NULL, 10);
 
 	/* Read encryption mode */
 	keyslot->area.encryption = luks2_read_string(fdt, area_node,
@@ -403,6 +581,36 @@ static int read_keyslot_info(const void *fdt, int keyslot_node,
 			   &keyslot->area.key_size))
 		return -EINVAL;
 
+	/* AES-256 or AES-XTS with two 128/256-bit keys */
+	if ((keyslot->key_size != 32 && keyslot->key_size != 64) ||
+	    (keyslot->area.key_size != 32 && keyslot->area.key_size != 64) ||
+	    strncmp(keyslot->area.encryption, "aes-", 4))
+		return -ENOTSUPP;
+
+	return 0;
+}
+
+/**
+ * check_keyslot_area() - Check that a keyslot's key material is on the disk
+ *
+ * @desc: Block device descriptor
+ * @pinfo: Partition information
+ * @ks: Keyslot
+ * Return: 0 if the key material lies within the partition, -EINVAL if not
+ */
+static int check_keyslot_area(struct blk_desc *desc,
+			      struct disk_partition *pinfo,
+			      const struct luks2_keyslot *ks)
+{
+	u64 size = (u64)ks->key_size * ks->af.stripes;
+	u64 part_size = (u64)pinfo->size * desc->blksz;
+
+	if (size > LUKS2_KM_MAX_SIZE || size > ks->area.size ||
+	    size % AES_BLOCK_LENGTH || ks->area.offset % desc->blksz ||
+	    ks->area.offset > part_size ||
+	    ks->area.size > part_size - ks->area.offset)
+		return -EINVAL;
+
 	return 0;
 }
 
@@ -413,68 +621,33 @@ static int read_keyslot_info(const void *fdt, int keyslot_node,
  * @pinfo: Partition information
  * @fdt_buf: Buffer to hold the converted FDT (caller must uninit)
  * @digest: Pointer to digest structure to fill
- * @md_type: Pointer to receive mbedtls MD type
+ * @md_type: Pointer to receive mbedtls MD type of the digest
+ * @digest_nodep: Pointer to receive the offset of the digest node
  * @keyslots_nodep: Pointer to receive the offset of the keyslots node
  * Return: 0 on success, -ve on error
  */
 static int read_luks2_info(struct udevice *blk, struct disk_partition *pinfo,
 			   struct abuf *fdt_buf, struct luks2_digest *digest,
-			   mbedtls_md_type_t *md_typep, int *keyslots_nodep)
+			   mbedtls_md_type_t *md_typep, int *digest_nodep,
+			   int *keyslots_nodep)
 {
-	struct blk_desc *desc = dev_get_uclass_plat(blk);
-	ALLOC_CACHE_ALIGN_BUFFER(u8, buffer, desc->blksz);
-	int digests_node, digest0, keyslots_node;
 	struct hash_algo *hash_algo;
-	mbedtls_md_type_t md_type;
-	struct luks2_hdr *hdr;
-	char *json_data;
+	int digest_node, keyslots_node;
 	const void *fdt;
-	int count, ret;
-	u64 hdr_size;
+	int ret;
 
-	abuf_init(fdt_buf);
-
-	/* Read LUKS2 header */
-	if (blk_read(blk, pinfo->start, 1, buffer) != 1)
-		return -EIO;
-
-	hdr = (struct luks2_hdr *)buffer;
-	hdr_size = be64_to_cpu(hdr->hdr_size);
-
-	log_debug("LUKS2: header size %llu bytes\n", hdr_size);
-
-	/* Allocate and read full header with JSON */
-	count = (hdr_size + desc->blksz - 1) / desc->blksz;
-	json_data = malloc_cache_aligned(count * desc->blksz);
-	if (!json_data)
-		return -ENOMEM;
-
-	if (blk_read(blk, pinfo->start, count, json_data) != count) {
-		ret = -EIO;
-		goto out;
-	}
-
-	ret = -EINVAL;
-
-	/* JSON starts after a 4K binary header: convert to FDT */
-	if (json_to_fdt(json_data + 4096, fdt_buf)) {
-		log_err("Failed to convert JSON to FDT\n");
-		goto out;
-	}
-
+	ret = luks2_read_metadata(blk, pinfo, fdt_buf);
+	if (ret)
+		return ret;
 	fdt = abuf_data(fdt_buf);
 
-	/* Navigate to digests node and get digest 0 */
-	digests_node = fdt_subnode_offset(fdt, 0, "digests");
-	if (digests_node < 0)
-		goto out;
-
-	digest0 = fdt_subnode_offset(fdt, digests_node, "0");
-	if (digest0 < 0)
+	ret = -EINVAL;
+	digest_node = luks2_find_digest(fdt);
+	if (digest_node < 0)
 		goto out;
 
 	/* Read digest information */
-	ret = read_digest_info(fdt, digest0, digest);
+	ret = read_digest_info(fdt, digest_node, digest);
 	if (ret)
 		goto out;
 
@@ -485,7 +658,6 @@ static int read_luks2_info(struct udevice *blk, struct disk_partition *pinfo,
 		ret = -ENOTSUPP;
 		goto out;
 	}
-	md_type = hash_mbedtls_type(hash_algo);
 
 	/* Navigate to keyslots node */
 	keyslots_node = fdt_subnode_offset(fdt, 0, "keyslots");
@@ -494,12 +666,11 @@ static int read_luks2_info(struct udevice *blk, struct disk_partition *pinfo,
 		goto out;
 	}
 
-	*md_typep = md_type;
+	*md_typep = hash_mbedtls_type(hash_algo);
+	*digest_nodep = digest_node;
 	*keyslots_nodep = keyslots_node;
 
 out:
-	memset(json_data, '\0', count * desc->blksz);
-	free(json_data);
 	if (ret)
 		abuf_uninit(fdt_buf);
 
@@ -633,7 +804,7 @@ static int decrypt_km_cbc(const u8 *derived_key, uint key_size,
  * @pinfo: Partition information for the LUKS2 volume
  * @ks: Keyslot information including KDF parameters and encryption area
  * @pass: User passphrase to try
- * @md_type: mbedtls message digest type for PBKDF2
+ * @md_type: mbedtls message digest type of the keyslot's PBKDF2 hash
  * @cand_key: Output buffer for the recovered candidate key
  * Return: 0 on success, negative error code on failure
  */
@@ -645,7 +816,7 @@ static int try_keyslot_pbkdf2(struct udevice *blk, struct disk_partition *pinfo,
 	struct blk_desc *desc = dev_get_uclass_plat(blk);
 	int ret, km_blocks, size;
 	u8 derived_key[128];
-	u8 *split_key, *km;
+	u8 *split_key = NULL, *km = NULL;
 
 	log_debug("LUKS2: trying keyslot with %u iters\n", ks->kdf.iters);
 
@@ -714,7 +885,7 @@ static int try_keyslot_argon2(struct udevice *blk, struct disk_partition *pinfo,
 	struct blk_desc *desc = dev_get_uclass_plat(blk);
 	int ret, km_blocks, size;
 	u8 derived_key[128];
-	u8 *split_key, *km;
+	u8 *split_key = NULL, *km = NULL;
 
 	log_debug("LUKS2: trying keyslot with Argon2id (t=%u, m=%u, p=%u)\n",
 		  ks->kdf.time, ks->kdf.memory, ks->kdf.cpus);
@@ -849,7 +1020,10 @@ static int verify_master_key(const struct luks2_digest *digest,
 	}
 
 	log_debug("LUKS2: digest calculated, comparing...\n");
-	if (memcmp(calculated_digest, digest->digest, digest->digest_len)) {
+	ret = mbedtls_ct_memcmp(calculated_digest, digest->digest,
+				digest->digest_len);
+	memset(calculated_digest, '\0', sizeof(calculated_digest));
+	if (ret) {
 		log_debug("LUKS2: digest mismatch!\n");
 		return -EACCES;
 	}
@@ -896,7 +1070,10 @@ static int try_unlock_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 	int ret;
 
 	/* Read keyslot information */
-	ret = read_keyslot_info(fdt, keyslot_node, &keyslot, digest->hash);
+	ret = read_keyslot_info(fdt, keyslot_node, &keyslot);
+	if (!ret)
+		ret = check_keyslot_area(dev_get_uclass_plat(blk), pinfo,
+					 &keyslot);
 	if (ret) {
 		/* Skip unsupported or invalid keyslots */
 		return -EAGAIN;
@@ -916,9 +1093,15 @@ static int try_unlock_keyslot(struct udevice *blk, struct disk_partition *pinfo,
 	} else {
 		/* Try the keyslot using the appropriate KDF */
 		if (keyslot.kdf.type == LUKS2_KDF_PBKDF2) {
+			struct hash_algo *algo;
+
+			/* The keyslot's PBKDF2 hash need not be the digest's */
+			if (hash_lookup_algo(keyslot.kdf.hash, &algo))
+				return -EAGAIN;
 			log_debug("LUKS2: calling try_keyslot_pbkdf2\n");
 			ret = try_keyslot_pbkdf2(blk, pinfo, &keyslot, pass, pass_len,
-						 md_type, cand_key);
+						 hash_mbedtls_type(algo),
+						 cand_key);
 		} else {
 			/* Argon2 (already checked for CONFIG_ARGON2 support) */
 			log_debug("LUKS2: calling try_keyslot_argon2\n");
@@ -950,7 +1133,7 @@ int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
 		 const u8 *pass, size_t pass_len, bool pre_derived,
 		 u8 *master_key, uint *key_sizep)
 {
-	int keyslots_node, keyslot_node;
+	int digest_node, keyslots_node, keyslot_node;
 	struct luks2_digest digest;
 	mbedtls_md_type_t md_type;
 	struct abuf fdt_buf;
@@ -958,7 +1141,7 @@ int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
 
 	/* Read and parse LUKS2 header and metadata */
 	ret = read_luks2_info(blk, pinfo, &fdt_buf, &digest, &md_type,
-			      &keyslots_node);
+			      &digest_node, &keyslots_node);
 	if (ret)
 		return ret;
 
@@ -966,6 +1149,18 @@ int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
 	ret = -EACCES;
 	fdt_for_each_subnode(keyslot_node, abuf_data(&fdt_buf),
 			     keyslots_node) {
+		const void *fdt = abuf_data(&fdt_buf);
+		const char *id = fdt_get_name(fdt, keyslot_node, NULL);
+		u32 priority;
+
+		/* Only keyslots that open the data segment's key are tried */
+		if (!id ||
+		    fdt_stringlist_search(fdt, digest_node, "keyslots", id) < 0)
+			continue;
+		/* Priority 0 ("ignore") keyslots are only used on request */
+		if (!luks2_read_u32(fdt, keyslot_node, "priority", &priority) &&
+		    !priority)
+			continue;
 		ret = try_unlock_keyslot(blk, pinfo, abuf_data(&fdt_buf),
 					 keyslot_node, &digest, md_type, pass,
 					 pass_len, pre_derived, master_key,
@@ -991,38 +1186,15 @@ int luks2_get_segment(struct udevice *blk, struct disk_partition *pinfo,
 		      struct luks2_segment *seg)
 {
 	struct blk_desc *desc = dev_get_uclass_plat(blk);
-	ALLOC_CACHE_ALIGN_BUFFER(u8, buf, desc->blksz);
-	const char *offset_str, *encryption;
-	int segments, segment0, blocks, ret;
-	struct luks2_hdr *hdr;
+	int segments, segment0, ret;
+	const char *encryption;
 	struct abuf fdt_buf;
 	const void *fdt;
-	char *json_data;
-	u64 hdr_size;
+	u64 part_size;
 
-	if (blk_read(blk, pinfo->start, 1, buf) != 1)
-		return -EIO;
-	hdr = (struct luks2_hdr *)buf;
-	hdr_size = be64_to_cpu(hdr->hdr_size);
-
-	/* Read full header with JSON */
-	blocks = (hdr_size + desc->blksz - 1) / desc->blksz;
-	json_data = malloc_cache_aligned(blocks * desc->blksz);
-	if (!json_data)
-		return -ENOMEM;
-
-	if (blk_read(blk, pinfo->start, blocks, json_data) != blocks) {
-		free(json_data);
-		return -EIO;
-	}
-
-	/* Convert JSON to FDT */
-	ret = json_to_fdt(json_data + 4096, &fdt_buf);
-	free(json_data);
-	if (ret) {
-		log_err("Failed to convert JSON to FDT: %d\n", ret);
-		return -EINVAL;
-	}
+	ret = luks2_read_metadata(blk, pinfo, &fdt_buf);
+	if (ret)
+		return ret;
 	fdt = abuf_data(&fdt_buf);
 
 	ret = -EINVAL;
@@ -1033,20 +1205,54 @@ int luks2_get_segment(struct udevice *blk, struct disk_partition *pinfo,
 	if (segment0 < 0)
 		goto out;
 
-	/* Get offset (string in LUKS2 JSON) */
-	offset_str = luks2_read_string(fdt, segment0, "offset");
-	if (!offset_str)
+	/*
+	 * A second segment means a reencryption is in progress; an integrity
+	 * section or flags need handling that is not implemented here.
+	 */
+	ret = -ENOTSUPP;
+	if (fdt_first_subnode(fdt, segments) != segment0 ||
+	    fdt_next_subnode(fdt, segment0) >= 0 ||
+	    strcmp(luks2_read_string(fdt, segment0, "type") ?: "", "crypt") ||
+	    strcmp(luks2_read_string(fdt, segment0, "iv_tweak") ?: "", "0") ||
+	    fdt_getprop(fdt, segment0, "flags", NULL) ||
+	    fdt_subnode_offset(fdt, segment0, "integrity") >= 0)
 		goto out;
-	seg->offset = simple_strtoull(offset_str, NULL, 10);
 
-	/* Parse cipher mode from encryption string */
 	encryption = luks2_read_string(fdt, segment0, "encryption");
-	seg->essiv = encryption && strstr(encryption, "essiv");
-	seg->xts = encryption && strstr(encryption, "xts");
+	if (!encryption)
+		goto out;
+	if (!strcmp(encryption, "aes-xts-plain64")) {
+		seg->xts = true;
+		seg->essiv = false;
+	} else if (!strcmp(encryption, "aes-cbc-essiv:sha256")) {
+		seg->xts = false;
+		seg->essiv = true;
+	} else {
+		log_debug("LUKS2: unsupported encryption %s\n", encryption);
+		goto out;
+	}
 
-	/* Read sector_size if present, else 512 */
-	if (luks2_read_u32(fdt, segment0, "sector_size", &seg->sector_size))
-		seg->sector_size = 512;
+	ret = -EINVAL;
+	if (luks2_read_u32(fdt, segment0, "sector_size", &seg->sector_size) ||
+	    seg->sector_size < 512 || seg->sector_size > 4096 ||
+	    !is_power_of_2(seg->sector_size) ||
+	    seg->sector_size < desc->blksz)
+		goto out;
+
+	/* Offset of the data and, unless "dynamic", its size, in bytes */
+	part_size = (u64)pinfo->size * desc->blksz;
+	if (luks2_read_u64(fdt, segment0, "offset", &seg->offset) ||
+	    seg->offset % seg->sector_size || seg->offset >= part_size)
+		goto out;
+	if (!strcmp(luks2_read_string(fdt, segment0, "size") ?: "",
+		    "dynamic"))
+		seg->size = part_size - seg->offset;
+	else if (luks2_read_u64(fdt, segment0, "size", &seg->size) ||
+		 seg->size > part_size - seg->offset)
+		goto out;
+	seg->size = ALIGN_DOWN(seg->size, seg->sector_size);
+	if (!seg->size)
+		goto out;
 	log_debug("LUKS2: sector_size=%u\n", seg->sector_size);
 	ret = 0;
 

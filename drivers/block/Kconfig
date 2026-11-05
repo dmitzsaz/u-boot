@@ -282,6 +282,7 @@ config BLK_LUKS
 	select PBKDF2
 	select PKCS5_MBEDTLS if MBEDTLS_LIB_CRYPTO
 	select JSON
+	select HASH
 	help
 	  This provides support for detecting and decrypting LUKS (Linux Unified
 	  Key Setup) encrypted partitions. LUKS is a disk encryption specification

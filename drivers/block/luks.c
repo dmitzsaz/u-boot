@@ -679,8 +679,9 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		if (ret)
 			return ret;
 
-		/* Convert byte offset to sectors */
+		/* Convert byte offset and size to blocks */
 		payload_offset = seg.offset / desc->blksz;
+		decrypted_size = seg.size / desc->blksz;
 		use_essiv = seg.essiv;
 		cipher_mode = seg.xts ? BLKMAP_CRYPT_MODE_XTS :
 			BLKMAP_CRYPT_MODE_CBC;
@@ -702,6 +703,11 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 
 		/* LUKS1 always uses 512-byte sectors */
 		sector_size = 512;
+		if (payload_offset >= pinfo->size) {
+			log_debug("LUKS1: payload outside the partition\n");
+			return -EINVAL;
+		}
+		decrypted_size = pinfo->size - payload_offset;
 		log_debug("LUKS1: sector_size=%u\n", sector_size);
 	}
 
@@ -724,11 +730,7 @@ int luks_create_blkmap(struct udevice *blk, struct disk_partition *pinfo,
 		}
 	}
 
-	/*
-	 * Map the encrypted partition to the blkmap device. The decrypted size
-	 * is the partition size minus the payload offset
-	 */
-	decrypted_size = pinfo->size - payload_offset;
+	/* Map the encrypted data to the blkmap device */
 	log_debug("mapping blkmap: blknr 0 blkcnt %llx payload_offset %x essiv %d\n",
 		  (unsigned long long)decrypted_size, payload_offset,
 		  use_essiv);

@@ -66,12 +66,14 @@ int unlock_luks2(struct udevice *blk, struct disk_partition *pinfo,
  * struct luks2_segment - Encrypted data segment of a LUKS2 volume
  *
  * @offset: Byte offset of the data from the start of the partition
+ * @size: Size of the data in bytes, a multiple of @sector_size
  * @sector_size: Encryption sector size in bytes
  * @xts: true for AES-XTS, false for AES-CBC
  * @essiv: true if CBC uses ESSIV
  */
 struct luks2_segment {
 	u64 offset;
+	u64 size;
 	u32 sector_size;
 	bool xts;
 	bool essiv;
