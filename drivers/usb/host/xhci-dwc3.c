@@ -226,6 +226,10 @@ static int xhci_dwc3_probe(struct udevice *dev)
 static int xhci_dwc3_remove(struct udevice *dev)
 {
 	struct xhci_dwc3_plat *plat = dev_get_plat(dev);
+	int ret;
+
+	/* Stop the controller while its PHYs, clocks and resets are still up. */
+	ret = xhci_deregister(dev);
 
 	dwc3_shutdown_phy(dev, &plat->phys);
 
@@ -233,7 +237,7 @@ static int xhci_dwc3_remove(struct udevice *dev)
 
 	reset_release_bulk(&plat->resets);
 
-	return xhci_deregister(dev);
+	return ret;
 }
 
 static const struct udevice_id xhci_dwc3_ids[] = {
