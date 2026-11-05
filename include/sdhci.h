@@ -356,6 +356,9 @@ struct sdhci_host {
 	void *align_buffer;
 	bool force_align_buffer;
 	dma_addr_t start_addr;
+	/* Bus addresses of the DMA buffer and ADMA table behind an IOMMU */
+	dma_addr_t iommu_addr;
+	dma_addr_t adma_iommu_addr;
 	int flags;
 #define USE_SDMA	(0x1 << 0)
 #define USE_ADMA	(0x1 << 1)

@@ -10,6 +10,7 @@
 #include <cpu_func.h>
 #include <dm.h>
 #include <errno.h>
+#include <iommu.h>
 #include <log.h>
 #include <malloc.h>
 #include <mmc.h>
@@ -71,9 +72,21 @@ static void sdhci_transfer_pio(struct sdhci_host *host, struct mmc_data *data)
 }
 
 #if (CONFIG_IS_ENABLED(MMC_SDHCI_SDMA) || CONFIG_IS_ENABLED(MMC_SDHCI_ADMA))
+/*
+ * A controller behind an IOMMU (e.g. an SD reader on a PCIe port with a
+ * translating DART) sees IOMMU addresses, not physical ones.
+ */
+static struct udevice *sdhci_iommu_dev(struct sdhci_host *host)
+{
+	struct udevice *dev = mmc_to_dev(host->mmc);
+
+	return CONFIG_IS_ENABLED(IOMMU) && dev && dev->iommu ? dev : NULL;
+}
+
 static void sdhci_prepare_dma(struct sdhci_host *host, struct mmc_data *data,
 			      int *is_aligned, int trans_bytes)
 {
+	struct udevice *iommu_dev = sdhci_iommu_dev(host);
 	dma_addr_t dma_addr;
 	unsigned char ctrl;
 	void *buf;
@@ -103,35 +116,71 @@ static void sdhci_prepare_dma(struct sdhci_host *host, struct mmc_data *data,
 
 	host->start_addr = dma_map_single(buf, trans_bytes,
 					  mmc_get_dma_dir(data));
+	if (iommu_dev)
+		host->iommu_addr = dev_iommu_dma_map(iommu_dev, buf,
+						     trans_bytes);
 
 	if (host->flags & USE_SDMA) {
-		dma_addr = dev_phys_to_bus(mmc_to_dev(host->mmc), host->start_addr);
+		dma_addr = iommu_dev ? host->iommu_addr :
+			dev_phys_to_bus(mmc_to_dev(host->mmc), host->start_addr);
 		sdhci_writel(host, dma_addr, SDHCI_DMA_ADDRESS);
 	}
 #if CONFIG_IS_ENABLED(MMC_SDHCI_ADMA)
 	else if (host->flags & (USE_ADMA | USE_ADMA64)) {
+		dma_addr_t adma_addr = host->adma_addr;
+
 		sdhci_prepare_adma_table(host, host->adma_desc_table, data,
+					 iommu_dev ? host->iommu_addr :
 					 host->start_addr);
 
-		sdhci_writel(host, lower_32_bits(host->adma_addr),
+		/* The descriptor table stays mapped for the host's lifetime */
+		if (iommu_dev) {
+			if (!host->adma_iommu_addr)
+				host->adma_iommu_addr =
+					dev_iommu_dma_map(iommu_dev,
+							  host->adma_desc_table,
+							  ADMA_TABLE_SZ);
+			adma_addr = host->adma_iommu_addr;
+		}
+		sdhci_writel(host, lower_32_bits(adma_addr),
 			     SDHCI_ADMA_ADDRESS);
 		if (host->flags & USE_ADMA64)
-			sdhci_writel(host, upper_32_bits(host->adma_addr),
+			sdhci_writel(host, upper_32_bits(adma_addr),
 				     SDHCI_ADMA_ADDRESS_HI);
 	}
 #endif
 }
+
+static void sdhci_unmap_dma(struct sdhci_host *host, struct mmc_data *data)
+{
+	struct udevice *iommu_dev = sdhci_iommu_dev(host);
+	size_t len = data->blocks * data->blocksize;
+
+	if (iommu_dev)
+		dev_iommu_dma_unmap(iommu_dev, host->iommu_addr, len);
+	dma_unmap_single(host->start_addr, len, mmc_get_dma_dir(data));
+}
 #else
 static void sdhci_prepare_dma(struct sdhci_host *host, struct mmc_data *data,
 			      int *is_aligned, int trans_bytes)
+{}
+
+static void sdhci_unmap_dma(struct sdhci_host *host, struct mmc_data *data)
 {}
 #endif
 static int sdhci_transfer_data(struct sdhci_host *host, struct mmc_data *data)
 {
 	dma_addr_t start_addr = host->start_addr;
 	unsigned int stat, rdy, mask, timeout, block = 0;
+	bool iommu = false;
 	bool transfer_done = false;
 
+#if (CONFIG_IS_ENABLED(MMC_SDHCI_SDMA) || CONFIG_IS_ENABLED(MMC_SDHCI_ADMA))
+	if (sdhci_iommu_dev(host)) {
+		start_addr = host->iommu_addr;
+		iommu = true;
+	}
+#endif
 	timeout = 1000000;
 	rdy = SDHCI_INT_SPACE_AVAIL | SDHCI_INT_DATA_AVAIL;
 	mask = SDHCI_DATA_AVAILABLE | SDHCI_SPACE_AVAILABLE;
@@ -139,6 +188,8 @@ static int sdhci_transfer_data(struct sdhci_host *host, struct mmc_data *data)
 		stat = sdhci_readl(host, SDHCI_INT_STATUS);
 		if (stat & SDHCI_INT_ERROR) {
 			log_debug("Error detected in status(%#x)!\n", stat);
+			if (host->flags & USE_DMA)
+				sdhci_unmap_dma(host, data);
 			return -EIO;
 		}
 		if (!transfer_done && (stat & rdy)) {
@@ -163,8 +214,9 @@ static int sdhci_transfer_data(struct sdhci_host *host, struct mmc_data *data)
 				start_addr &=
 				~(SDHCI_DEFAULT_BOUNDARY_SIZE - 1);
 				start_addr += SDHCI_DEFAULT_BOUNDARY_SIZE;
-				start_addr = dev_phys_to_bus(mmc_to_dev(host->mmc),
-							     start_addr);
+				if (!iommu)
+					start_addr = dev_phys_to_bus(mmc_to_dev(host->mmc),
+								     start_addr);
 				sdhci_writel(host, start_addr, SDHCI_DMA_ADDRESS);
 			}
 		}
@@ -172,16 +224,14 @@ static int sdhci_transfer_data(struct sdhci_host *host, struct mmc_data *data)
 			udelay(10);
 		else {
 			log_err("Transfer data timeout\n");
+			if (host->flags & USE_DMA)
+				sdhci_unmap_dma(host, data);
 			return -ETIMEDOUT;
 		}
 	} while (!(stat & SDHCI_INT_DATA_END));
 
-#if (CONFIG_IS_ENABLED(MMC_SDHCI_SDMA) || CONFIG_IS_ENABLED(MMC_SDHCI_ADMA))
-	if (host->flags & USE_DMA) {
-		dma_unmap_single(host->start_addr, data->blocks * data->blocksize,
-				 mmc_get_dma_dir(data));
-	}
-#endif
+	if (host->flags & USE_DMA)
+		sdhci_unmap_dma(host, data);
 
 	return 0;
 }
