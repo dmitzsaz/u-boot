@@ -34,6 +34,8 @@ int apple_rtkit_get_buffers(struct apple_rtkit *rtk,
 			   struct apple_rtkit_buffer *buffers, size_t count);
 int apple_rtkit_boot(struct apple_rtkit *rtk);
 int apple_rtkit_boot_with_sys_ep_mask(struct apple_rtkit *rtk, u32 system_eps);
+#define APPLE_RTKIT_BOOT_AP_FIRST BIT(0)
+int apple_rtkit_boot_with_options(struct apple_rtkit *rtk, u32 system_eps, u32 flags);
 int apple_rtkit_set_ap_power(struct apple_rtkit *rtk, int pwrstate);
 int apple_rtkit_poll(struct apple_rtkit *rtk, ulong timeout);
 int apple_rtkit_shutdown(struct apple_rtkit *rtk, int pwrstate);

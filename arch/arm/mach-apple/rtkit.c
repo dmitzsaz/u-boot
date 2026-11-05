@@ -319,7 +319,7 @@ int apple_rtkit_poll(struct apple_rtkit *rtk, ulong timeout)
 	}
 }
 
-int apple_rtkit_boot_with_sys_ep_mask(struct apple_rtkit *rtk, u32 system_eps)
+int apple_rtkit_boot_with_options(struct apple_rtkit *rtk, u32 system_eps, u32 flags)
 {
 	struct apple_mbox_msg msg;
 	int endpoints[256];
@@ -447,6 +447,13 @@ wait_epmap:
 	rtk->iop_pwr = APPLE_RTKIT_PWR_STATE_SLEEP;
 	rtk->ap_pwr = APPLE_RTKIT_PWR_STATE_QUIESCED;
 
+	/* Some firmware reports IOP power on only once the AP side is on. */
+	if (flags & APPLE_RTKIT_BOOT_AP_FIRST) {
+		ret = apple_rtkit_set_ap_power(rtk, APPLE_RTKIT_PWR_STATE_ON);
+		if (ret < 0)
+			return ret;
+	}
+
 	while (rtk->iop_pwr != APPLE_RTKIT_PWR_STATE_ON) {
 		ret = apple_rtkit_poll(rtk, TIMEOUT_1SEC_US);
 		if (ret < 0)
@@ -454,6 +461,11 @@ wait_epmap:
 	}
 
 	return 0;
+}
+
+int apple_rtkit_boot_with_sys_ep_mask(struct apple_rtkit *rtk, u32 system_eps)
+{
+	return apple_rtkit_boot_with_options(rtk, system_eps, 0);
 }
 
 int apple_rtkit_boot(struct apple_rtkit *rtk)
